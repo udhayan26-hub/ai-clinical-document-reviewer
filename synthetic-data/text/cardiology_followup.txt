@@ -1,0 +1,28 @@
+SYNTHETIC CLINICAL NOTE - Cardiology Follow-up (fictional patient, no real data)
+
+Patient: Robert Lin, 64-year-old male
+Date of visit: 2026-03-12
+
+Chief complaint: Intermittent palpitations and mild dizziness for two weeks.
+
+History of present illness: Patient reports palpitations lasting 5-10 minutes, occurring
+mostly in the evening. Denies syncope. Denies chest pain. Reports occasional shortness of
+breath when climbing two flights of stairs.
+
+Past medical history: Hypertension, hyperlipidemia, former smoker (quit 2019).
+
+Medications: Amlodipine 5 mg daily, Atorvastatin 20 mg nightly, Aspirin 81 mg daily.
+
+Allergies: Sulfa drugs (hives).
+
+Vitals: BP 152/94 mmHg, heart rate 96 bpm irregular, respiratory rate 16, SpO2 97% on room
+air, weight 84 kg.
+
+Examination: Irregularly irregular pulse. No murmurs. Lungs clear to auscultation. No leg
+edema.
+
+Assessment: Suspected paroxysmal atrial fibrillation. Blood pressure above target.
+
+Plan: 12-lead ECG today, 24-hour Holter monitor, TSH and basic metabolic panel, echocardiogram.
+Discuss anticoagulation once rhythm is confirmed. Increase amlodipine to 10 mg daily.
+Follow up in 2 weeks.

@@ -1,0 +1,58 @@
+flowchart TB
+    User(["User"])
+
+    subgraph Client["Frontend"]
+        FE["React + TypeScript + Vite\n(Tailwind CSS)"]
+    end
+
+    subgraph Backend["Backend (FastAPI)"]
+        API["API layer\napp/api/v1\n(routing, request/response validation)"]
+        SVC["Services\napp/services\n(orchestration, validation, use cases)"]
+        REPO["Repositories\napp/repositories\n(SQLAlchemy persistence)"]
+
+        subgraph DocProc["Document Processing\napp/document_processing"]
+            TXT["TextProcessor\n(plain text)"]
+            PDFP["PDFProcessor\n(native text via pypdf,\nper page; OCR fallback\nfor pages with none)"]
+            IMG["ImageProcessor\n(validates image,\ndelegates to OCREngine)"]
+            OCR["OCREngine\n(TesseractOCREngine —\nlocal Tesseract binary,\nno external service)"]
+        end
+
+        subgraph AI["AI / ML pipeline\napp/ai"]
+            PIPE["ClinicalAnalysisPipeline\n(EXTRACT -> GENERATE -> VALIDATE\norchestrator)"]
+            AIP["AIProvider\n(one impl: UnconfiguredAIProvider —\nno real LLM wired up yet)"]
+            CRV["ClinicalReportValidator\n(DeterministicClinicalReportValidator —\npure Python, no LLM call)"]
+        end
+    end
+
+    DB[("PostgreSQL\ndocuments / analyses /\nclinical_reports / processing_events")]
+    STORAGE[("Object Storage\nlocal disk (dev) / S3 (prod)\nraw uploaded files")]
+    EXTAI(["External AI Service\n(provider TBD, swappable)"])
+
+    User -->|"submits text / image / PDF"| FE
+    FE -->|"REST /api/v1 (JSON + multipart)"| API
+    API --> SVC
+    SVC --> REPO
+    REPO <--> DB
+
+    SVC -->|"raw file bytes\n(TEXT only — PDF/IMAGE\nbytes not yet persisted)"| STORAGE
+    SVC -->|"route by source_type\n(document_processing/factory.py)"| DocProc
+    TXT -->|"NormalizedDocument"| SVC
+    PDFP -->|"NormalizedDocument"| SVC
+    IMG -->|"NormalizedDocument"| SVC
+    PDFP -.->|"page image\n(only if page has\nno native text)"| OCR
+    IMG -->|"image bytes"| OCR
+    OCR -->|"OCRResult"| PDFP
+    OCR -->|"OCRResult"| IMG
+
+    SVC -->|"run_pipeline():\nNormalizedDocument"| PIPE
+    PIPE -->|"extract() / generate()"| AIP
+    AIP -->|"ExtractionResult / draft report"| PIPE
+    AIP -.->|"provider call\n(none yet — placeholder\nraises instead)"| EXTAI
+    PIPE -->|"draft report + ExtractionResult\n+ source text"| CRV
+    CRV -->|"ValidationResult"| PIPE
+    PIPE -->|"PipelineResult\n(or raises on any\nstage failure)"| SVC
+
+    SVC -->|"persist ClinicalReport +\nProcessingEvent audit trail"| REPO
+
+    API -->|"AnalysisResponse /\nClinicalReportResponse / ErrorResponse"| FE
+    FE -->|"status, structured report,\nhistory"| User

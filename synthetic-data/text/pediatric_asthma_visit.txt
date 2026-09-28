@@ -1,0 +1,23 @@
+SYNTHETIC CLINICAL NOTE - Pediatric Visit (fictional patient, no real data)
+
+Patient: Maya Patel, 7-year-old female
+Date of visit: 2026-04-02
+
+Reason for visit: Nighttime cough and wheezing for one week, worse after playing outside.
+
+History: Known mild persistent asthma since age 4. Uses albuterol inhaler about four times
+a week over the past two weeks. Missed two school days. No fever reported by parent.
+
+Medications: Albuterol inhaler as needed, fluticasone inhaler 44 mcg twice daily (parent
+says doses are sometimes missed).
+
+Allergies: Peanuts (anaphylaxis). Seasonal pollen.
+
+Vitals: Temperature 98.4 F, heart rate 102 bpm, respiratory rate 24, SpO2 95% on room air.
+
+Examination: Scattered expiratory wheezes bilaterally. No retractions. Throat clear.
+
+Assessment: Asthma, not well controlled; likely seasonal trigger.
+
+Plan: Reinforce daily controller inhaler use, review spacer technique, add montelukast
+4 mg nightly. Written asthma action plan given. Return in 4 weeks or sooner if symptoms worsen.

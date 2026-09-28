@@ -1,0 +1,60 @@
+# Production deployment variant. Not used by local development (which
+# continues to use docker-compose.yml unchanged). db is identical to
+# docker-compose.yml. The backend is unchanged but no longer publishes its
+# port to the host — it's reached only via nginx's reverse proxy inside the
+# frontend container, so the interviewer only ever needs one public URL.
+# frontend builds a static/nginx image instead of running the Vite dev
+# server, listens on 80, and proxies /api/ and /health to the backend
+# service over the internal Docker network.
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: clinical-reviewer-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-clinical_reviewer}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: clinical-reviewer-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-clinical_reviewer}
+      UPLOAD_STORAGE_DIR: /app/storage
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - "8000"
+    volumes:
+      - backend_storage:/app/storage
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+    container_name: clinical-reviewer-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+
+volumes:
+  pgdata:
+  backend_storage:

@@ -1,0 +1,12 @@
+# Never apply line-ending conversion or text diff/merge to binary formats —
+# without this, Git's autocrlf can silently corrupt these files on checkout
+# (e.g. rewriting embedded LF bytes inside a PDF to CRLF, breaking its
+# internal byte-offset tables) on any machine/CI with core.autocrlf enabled.
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

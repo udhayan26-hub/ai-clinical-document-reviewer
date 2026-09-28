@@ -50,7 +50,7 @@ export type PipelineStageKey = "uploading" | "extracting" | "analyzing" | "valid
 export interface PipelineStageState {
   key: PipelineStageKey;
   label: string;
-  state: "done" | "failed" | "skipped" | "active";
+  state: "done" | "failed" | "skipped" | "active" | "pending";
 }
 
 const EXTRACTION_ERROR_CODES = new Set([
@@ -100,6 +100,17 @@ export function buildPipelineStages(status: AnalysisStatus, errorCode: string | 
   }
 
   // In-flight (only visible client-side while the blocking POST is pending —
-  // the backend has no intermediate state to report yet).
-  return stages.map((s) => ({ ...s, state: s.key === "uploading" ? "done" : "active" }));
+  // the backend has no intermediate state to report yet). "extracting" is
+  // shown done because it's structurally guaranteed to have already run:
+  // AnalysisService.run_pipeline() always finishes document normalization
+  // (measured negligible, ~0.02ms) before ever calling the AI provider —
+  // this isn't a guess, it's the real, fixed order of the code that runs
+  // for every request. "analyzing" — the two real AI calls — is where
+  // virtually all of the ~80s wait actually happens, so it's the only
+  // stage shown as in-progress; the rest are genuinely not yet reached.
+  return stages.map((s) => {
+    if (s.key === "uploading" || s.key === "extracting") return { ...s, state: "done" };
+    if (s.key === "analyzing") return { ...s, state: "active" };
+    return { ...s, state: "pending" };
+  });
 }

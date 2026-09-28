@@ -41,11 +41,15 @@ export default function PipelineProgress({ status, errorCode = null }: Props) {
               {stage.state === "done" && ICON.done}
               {stage.state === "failed" && ICON.failed}
               {stage.state === "active" && <span className="h-3 w-3 animate-spin rounded-full border-2 border-sky-300 border-t-sky-700" />}
-              {stage.state === "skipped" && <span>{index + 1}</span>}
+              {(stage.state === "skipped" || stage.state === "pending") && <span>{index + 1}</span>}
             </div>
             <span
               className={`text-[11px] font-medium ${
-                stage.state === "failed" ? "text-rose-700" : stage.state === "skipped" ? "text-slate-400" : "text-slate-700"
+                stage.state === "failed"
+                  ? "text-rose-700"
+                  : stage.state === "skipped" || stage.state === "pending"
+                    ? "text-slate-400"
+                    : "text-slate-700"
               }`}
             >
               {stage.label}

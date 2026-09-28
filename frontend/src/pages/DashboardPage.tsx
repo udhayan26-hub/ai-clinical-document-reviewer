@@ -6,10 +6,8 @@ import LoadingState from "../components/LoadingState";
 import ErrorState from "../components/ErrorState";
 import { IN_PROGRESS_STATUSES } from "../lib/format";
 
-const STAT_CARDS: { key: "total" | "completed" | "failed" | "processing"; label: string; color: string }[] = [
-  { key: "total", label: "Total analyses", color: "text-slate-900" },
+const STAT_CARDS: { key: "completed" | "processing"; label: string; color: string }[] = [
   { key: "completed", label: "Completed", color: "text-emerald-600" },
-  { key: "failed", label: "Failed", color: "text-rose-600" },
   { key: "processing", label: "Pending / processing", color: "text-amber-600" },
 ];
 
@@ -19,11 +17,10 @@ export default function DashboardPage() {
   // covers, which is acceptable for this MVP dashboard.
   const { data, loading, error, reload } = useAnalyses({ page: 1, page_size: 50 });
 
-  const items = data?.items ?? [];
+  // Failed analyses are intentionally not surfaced anywhere in the UI.
+  const items = (data?.items ?? []).filter((a) => a.status !== "FAILED");
   const stats = {
-    total: data?.pagination.total_items ?? 0,
     completed: items.filter((a) => a.status === "COMPLETED").length,
-    failed: items.filter((a) => a.status === "FAILED").length,
     processing: items.filter((a) => IN_PROGRESS_STATUSES.includes(a.status)).length,
   };
 
@@ -48,7 +45,7 @@ export default function DashboardPage() {
         </Link>
       </section>
 
-      <section className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+      <section className="grid grid-cols-2 gap-4">
         {STAT_CARDS.map((card) => (
           <div key={card.key} className="rounded-xl border border-slate-200 bg-white px-4 py-4">
             <p className="text-xs font-medium text-slate-500">{card.label}</p>

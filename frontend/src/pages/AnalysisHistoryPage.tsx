@@ -12,7 +12,7 @@ const PAGE_SIZE = 20;
 export default function AnalysisHistoryPage() {
   const navigate = useNavigate();
   const [page, setPage] = useState(1);
-  const { data, loading, error, reload } = useAnalyses({ page, page_size: PAGE_SIZE });
+  const { data, loading, error, reload } = useAnalyses({ page, page_size: PAGE_SIZE, status: "COMPLETED" });
 
   const items = data?.items ?? [];
   const pagination = data?.pagination;
@@ -21,7 +21,7 @@ export default function AnalysisHistoryPage() {
     <div className="space-y-5">
       <div>
         <h1 className="text-xl font-semibold text-slate-900">Analysis History</h1>
-        <p className="mt-1 text-sm text-slate-500">Every document submitted for review, most recent first.</p>
+        <p className="mt-1 text-sm text-slate-500">Every successfully completed review, most recent first.</p>
       </div>
 
       {loading && <LoadingState label="Loading analysis history…" />}

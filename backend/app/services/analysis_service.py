@@ -22,6 +22,7 @@ raises: any failure is reflected as `Analysis.status == FAILED`.
 import hashlib
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -41,6 +42,7 @@ from app.core.exceptions import (
     UnsupportedFileTypeError,
     ValidationFailedError,
 )
+from app.document_processing.factory import get_processor
 from app.document_processing.interfaces import NormalizedDocument
 from app.document_processing.text_processor import TextProcessor
 from app.models.analysis import Analysis
@@ -112,6 +114,7 @@ class AnalysisService:
             raw_bytes = file_bytes
 
         checksum = hashlib.sha256(raw_bytes).hexdigest()
+        storage_uri = self._persist_file_bytes(checksum, raw_bytes) if source_type != DocumentSourceType.TEXT else None
 
         document = Document(
             source_type=source_type,
@@ -119,7 +122,7 @@ class AnalysisService:
             content_type=(content_type or "text/plain").lower(),
             size_bytes=len(raw_bytes),
             checksum_sha256=checksum,
-            storage_uri=None,  # object storage persistence is not yet implemented
+            storage_uri=storage_uri,
         )
         self.documents.create(document)
 
@@ -231,17 +234,31 @@ class AnalysisService:
 
         return analysis
 
+    def _persist_file_bytes(self, checksum: str, raw_bytes: bytes) -> str:
+        """Writes uploaded file bytes to local disk, keyed by content
+        checksum (see docs/decisions/005-storage.md: local filesystem for
+        dev, same `storage_uri` contract would point at S3 later). Reusing
+        the checksum as the filename means re-uploading identical content
+        is naturally deduplicated on disk.
+        """
+        storage_dir = Path(self.settings.upload_storage_dir)
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        path = storage_dir / checksum
+        path.write_bytes(raw_bytes)
+        return str(path)
+
     def _build_normalized_document(self, analysis: Analysis) -> NormalizedDocument:
         document = analysis.document
         if document.source_type == DocumentSourceType.TEXT:
             if not analysis.extracted_text:
                 raise DocumentBytesUnavailableError("No text content is stored for this analysis.")
             return TextProcessor().process(analysis.extracted_text.encode("utf-8"))
-        raise DocumentBytesUnavailableError(
-            f"Raw {document.source_type.value} file bytes were not persisted at upload time "
-            "(object storage is not implemented yet — see docs/decisions/005-storage.md); "
-            "this analysis cannot be re-processed until that exists."
-        )
+        if not document.storage_uri:
+            raise DocumentBytesUnavailableError(
+                f"Raw {document.source_type.value} file bytes were not persisted at upload time."
+            )
+        raw_bytes = Path(document.storage_uri).read_bytes()
+        return get_processor(document.source_type).process(raw_bytes)
 
     def _persist_report(self, analysis: Analysis, result: PipelineResult) -> None:
         validated_report = result.validation.report

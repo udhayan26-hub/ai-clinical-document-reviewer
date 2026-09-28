@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { ApiError } from "../services/apiClient";
 
 interface Props {
@@ -5,10 +6,17 @@ interface Props {
   onRetry?: () => void;
 }
 
-function describe(error: unknown): { title: string; message: string; requestId?: string | null } {
+function describe(error: unknown): { title: string; message: string; requestId?: string | null; notFound?: boolean } {
   if (error instanceof ApiError) {
     if (error.isNetworkError) {
       return { title: "Can't reach the server", message: error.message };
+    }
+    if (error.code === "NOT_FOUND") {
+      return {
+        title: "Analysis not found",
+        message: "This analysis may have been deleted or the link may be incorrect.",
+        notFound: true,
+      };
     }
     return { title: `Something went wrong (${error.code})`, message: error.message, requestId: error.requestId };
   }
@@ -19,7 +27,7 @@ function describe(error: unknown): { title: string; message: string; requestId?:
 }
 
 export default function ErrorState({ error, onRetry }: Props) {
-  const { title, message, requestId } = describe(error);
+  const { title, message, requestId, notFound } = describe(error);
   return (
     <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-rose-200 bg-rose-50 px-6 py-14 text-center">
       <div className="flex h-12 w-12 items-center justify-center rounded-full bg-rose-100 text-rose-600">
@@ -30,14 +38,23 @@ export default function ErrorState({ error, onRetry }: Props) {
       <h3 className="text-sm font-semibold text-rose-900">{title}</h3>
       <p className="max-w-md text-sm text-rose-700">{message}</p>
       {requestId && <p className="text-xs text-rose-400">Request ID: {requestId}</p>}
-      {onRetry && (
-        <button
-          type="button"
-          onClick={onRetry}
+      {notFound ? (
+        <Link
+          to="/analyses"
           className="mt-1 rounded-md bg-white px-3 py-1.5 text-sm font-medium text-rose-700 ring-1 ring-inset ring-rose-300 hover:bg-rose-50"
         >
-          Try again
-        </button>
+          Back to History
+        </Link>
+      ) : (
+        onRetry && (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="mt-1 rounded-md bg-white px-3 py-1.5 text-sm font-medium text-rose-700 ring-1 ring-inset ring-rose-300 hover:bg-rose-50"
+          >
+            Try again
+          </button>
+        )
       )}
     </div>
   );

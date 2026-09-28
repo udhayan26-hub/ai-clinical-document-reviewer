@@ -25,6 +25,74 @@ export const STATUS_LABEL: Record<AnalysisStatus, string> = {
   FAILED: "Failed",
 };
 
+/**
+ * Human-readable headline/message for a failed analysis, keyed by the
+ * backend's `error_code`. The raw code is still shown (as secondary
+ * technical detail, not hidden) — this only replaces the developer-facing
+ * headline/message pairing with wording a non-technical reviewer can act on.
+ */
+export interface FailureMessage {
+  headline: string;
+  message: string;
+}
+
+const FAILURE_MESSAGES: Record<string, FailureMessage> = {
+  EXTRACTION_FAILED: {
+    headline: "We couldn't read the document",
+    message: "The document's content couldn't be extracted for review. Try a clearer file, or paste the text directly.",
+  },
+  OCR_FAILED: {
+    headline: "We couldn't read the document",
+    message: "Text recognition failed on the uploaded file. Try a clearer scan or a different file format.",
+  },
+  DOCUMENT_BYTES_UNAVAILABLE: {
+    headline: "We couldn't process this document",
+    message: "The original file content is no longer available for this analysis.",
+  },
+  AI_PROCESSING_FAILED: {
+    headline: "Analysis could not be completed",
+    message: "The AI review service couldn't process this document. Please try again.",
+  },
+  AI_EXTRACTION_FAILED: {
+    headline: "Analysis could not be completed",
+    message: "The AI review service couldn't process this document. Please try again.",
+  },
+  AI_GENERATION_FAILED: {
+    headline: "Analysis could not be completed",
+    message: "The AI review service couldn't process this document. Please try again.",
+  },
+  EVIDENCE_MISMATCH: {
+    headline: "Analysis could not be completed",
+    message: "We couldn't verify the generated findings against the source document. Please try again.",
+  },
+  REPORT_VALIDATION_FAILED: {
+    headline: "Analysis could not be completed",
+    message: "We couldn't verify the generated findings against the source document. Please try again.",
+  },
+  UNSUPPORTED_AI_PROVIDER: {
+    headline: "AI review is not available",
+    message: "The configured AI provider isn't set up correctly.",
+  },
+  PERSISTENCE_FAILED: {
+    headline: "Something went wrong saving this analysis",
+    message: "The report couldn't be saved. Please try again.",
+  },
+  EXTERNAL_SERVICE_FAILED: {
+    headline: "Analysis could not be completed",
+    message: "A required external service was unavailable. Please try again.",
+  },
+};
+
+const DEFAULT_FAILURE_MESSAGE: FailureMessage = {
+  headline: "Analysis could not be completed",
+  message: "Something went wrong while processing this document. Please try again.",
+};
+
+export function getFailureMessage(errorCode: string | null): FailureMessage {
+  if (errorCode && FAILURE_MESSAGES[errorCode]) return FAILURE_MESSAGES[errorCode];
+  return DEFAULT_FAILURE_MESSAGE;
+}
+
 /** Tailwind class groups for status pills/badges — one source of truth
  * for status color so it's consistent across cards, tables, and badges. */
 export const STATUS_COLOR: Record<AnalysisStatus, string> = {

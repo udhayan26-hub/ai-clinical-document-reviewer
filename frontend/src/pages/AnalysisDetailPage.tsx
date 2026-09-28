@@ -7,7 +7,7 @@ import FindingItem from "../components/FindingItem";
 import WarningBanner from "../components/WarningBanner";
 import LoadingState from "../components/LoadingState";
 import ErrorState from "../components/ErrorState";
-import { formatDateTime } from "../lib/format";
+import { formatDateTime, getFailureMessage } from "../lib/format";
 import type { ClinicalReport, SourcedFinding } from "../types/clinicalReport";
 
 export default function AnalysisDetailPage() {
@@ -66,12 +66,18 @@ export default function AnalysisDetailPage() {
         )}
       </div>
 
-      {analysis.status === "FAILED" && (
-        <WarningBanner tone="danger" title="This analysis failed">
-          <p>{analysis.error_message ?? "The analysis could not be completed."}</p>
-          {analysis.error_code && <p className="mt-1 font-mono text-[11px] opacity-75">{analysis.error_code}</p>}
-        </WarningBanner>
-      )}
+      {analysis.status === "FAILED" &&
+        (() => {
+          const { headline, message } = getFailureMessage(analysis.error_code);
+          return (
+            <WarningBanner tone="danger" title={headline}>
+              <p>{message}</p>
+              {analysis.error_code && (
+                <p className="mt-1 font-mono text-[11px] opacity-75">Technical code: {analysis.error_code}</p>
+              )}
+            </WarningBanner>
+          );
+        })()}
 
       {(analysis.status === "PENDING" ||
         analysis.status === "VALIDATING" ||

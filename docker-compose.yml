@@ -30,6 +30,11 @@ services:
       # running the backend outside Docker) — inside the compose network
       # the database is reachable at the "db" service name, not localhost.
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-clinical_reviewer}
+      # Overrides .env's UPLOAD_STORAGE_DIR (./backend/storage, relative to
+      # a repo-root working directory) — the container's working directory
+      # is already /app (bind-mounted from ./backend), so the unmodified
+      # default would resolve one level too deep.
+      UPLOAD_STORAGE_DIR: /app/storage
     depends_on:
       db:
         condition: service_healthy

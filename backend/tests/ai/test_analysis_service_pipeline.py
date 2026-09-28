@@ -8,6 +8,7 @@ from app.core.enums import AnalysisStatus, ProcessingEventType
 from app.services.analysis_service import AnalysisService
 from tests.ai.builders import SOURCE_TEXT, build_grounded_extraction, build_valid_draft_report
 from tests.ai.fakes import FakeAIProvider
+from tests.document_processing.fixture_paths import load_pdf_fixture
 
 
 def make_service(db_session, provider: FakeAIProvider) -> AnalysisService:
@@ -28,10 +29,27 @@ def test_run_pipeline_completes_successfully_for_text_analysis(db_session):
     assert report.ai_provider == service.settings.ai_provider
 
 
-def test_run_pipeline_fails_gracefully_for_pdf_without_stored_bytes(db_session):
-    """PDF/IMAGE raw bytes are never persisted yet (object storage is not
-    implemented) — run_pipeline must fail cleanly with a clear error, not
-    crash, and not pretend to have processed the document."""
+def test_run_pipeline_completes_successfully_for_pdf_analysis(db_session):
+    """Raw PDF bytes are persisted at upload time (see
+    docs/decisions/005-storage.md) and read back during run_pipeline, so a
+    real PDF reaches the same extract -> generate -> validate -> COMPLETED
+    pipeline as a TEXT analysis."""
+    provider = FakeAIProvider(extraction_result=build_grounded_extraction(), draft_report=build_valid_draft_report())
+    service = make_service(db_session, provider)
+    pdf_bytes = load_pdf_fixture("valid_text_grounded.pdf")
+    analysis = service.create_analysis(text=None, filename="note.pdf", content_type="application/pdf", file_bytes=pdf_bytes)
+
+    completed = service.run_pipeline(analysis.id)
+
+    assert completed.status == AnalysisStatus.COMPLETED
+    assert completed.error_code is None
+    report = service.get_report(analysis.id)
+    assert report.report_summary
+
+
+def test_run_pipeline_fails_cleanly_for_corrupted_pdf_bytes(db_session):
+    """Malformed file content must still fail cleanly and never reach the
+    AI provider, independent of whether the bytes were persisted."""
     provider = FakeAIProvider()
     service = make_service(db_session, provider)
     pdf_bytes = b"%PDF-1.4 minimal placeholder content for a non-empty upload"
@@ -40,7 +58,7 @@ def test_run_pipeline_fails_gracefully_for_pdf_without_stored_bytes(db_session):
     failed = service.run_pipeline(analysis.id)
 
     assert failed.status == AnalysisStatus.FAILED
-    assert failed.error_code == "DOCUMENT_BYTES_UNAVAILABLE"
+    assert failed.error_code == "CORRUPTED_FILE"
     assert provider.extract_calls == []  # never even reached the AI provider
 
 

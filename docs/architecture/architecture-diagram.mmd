@@ -1,0 +1,49 @@
+flowchart TB
+    User(["User"])
+
+    subgraph Client["Frontend"]
+        FE["React + TypeScript + Vite\n(Tailwind CSS)"]
+    end
+
+    subgraph Backend["Backend (FastAPI)"]
+        API["API layer\napp/api/v1\n(routing, request/response validation)"]
+        SVC["Services\napp/services\n(orchestration, validation, use cases)"]
+        REPO["Repositories\napp/repositories\n(SQLAlchemy persistence)"]
+
+        subgraph DocProc["Document Processing\napp/document_processing"]
+            EXT["DocumentTextExtractor\n(TXT / typed PDF)"]
+            OCR["OCRProcessor\n(images, scanned & handwritten PDFs)"]
+        end
+
+        subgraph AI["AI / ML layer\napp/ai (interfaces) + ml/ (implementations)"]
+            CIE["ClinicalInformationExtractor"]
+            CRG["ClinicalReportGenerator"]
+            SOV["StructuredOutputValidator"]
+        end
+    end
+
+    DB[("PostgreSQL\ndocuments / analyses /\nclinical_reports / processing_events")]
+    STORAGE[("Object Storage\nlocal disk (dev) / S3 (prod)\nraw uploaded files")]
+    EXTAI(["External AI Service\n(provider TBD, swappable)"])
+
+    User -->|"submits text / image / PDF"| FE
+    FE -->|"REST /api/v1 (JSON + multipart)"| API
+    API --> SVC
+    SVC --> REPO
+    REPO <--> DB
+
+    SVC -->|"raw file bytes"| STORAGE
+    SVC -->|"route by source_type"| DocProc
+    EXT -->|"normalized text"| SVC
+    OCR -->|"normalized text"| SVC
+
+    SVC -->|"normalized text"| AI
+    CIE --> CRG
+    CRG --> SOV
+    SOV -->|"validated ClinicalReport"| SVC
+    CRG -.->|"provider call\n(implementation-specific)"| EXTAI
+
+    SVC -->|"persist ClinicalReport +\nProcessingEvent audit trail"| REPO
+
+    API -->|"AnalysisResponse /\nClinicalReportResponse / ErrorResponse"| FE
+    FE -->|"status, structured report,\nhistory"| User

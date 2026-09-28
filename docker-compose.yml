@@ -27,6 +27,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # Overrides .env's DATABASE_URL (which defaults to localhost, for
+      # running the backend outside Docker) — inside the compose network
+      # the database is reachable at the "db" service name, not localhost.
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-clinical_reviewer}
     depends_on:
       db:
         condition: service_healthy

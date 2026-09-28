@@ -16,7 +16,7 @@ See [`architecture-diagram.mmd`](architecture-diagram.mmd) for the full componen
 Two hard boundaries shape the whole design:
 
 1. **Frontend and backend are fully separate** — the frontend only ever talks to the backend over the versioned REST contract in [§3](#3-api-contract). No shared code, no server-rendering coupling.
-2. **The AI/ML layer is provider-agnostic** — `app/ai` exposes interfaces only, and `app/document_processing` depends on no OCR/AI provider at all yet ([§6](#6-aiml-architecture)); no OpenAI/Anthropic/Gemini/Tesseract/etc. specific code exists in business logic. Swapping a provider means adding one new implementation class, never touching `app/api` or `app/services`.
+2. **The AI/ML layer is provider-agnostic** — `app/ai` exposes interfaces only (no LLM provider selected or called anywhere), and `app/document_processing`'s one concrete OCR engine (local, offline Tesseract — see [007-ocr.md](../decisions/007-ocr.md)) sits behind an `OCREngine` interface ([§6](#6-aiml-architecture)); no OpenAI/Anthropic/Gemini-specific code exists in business logic anywhere, and even the OCR engine choice is swappable without touching `ImageProcessor`/`PDFProcessor`. Swapping a provider means adding one new implementation class, never touching `app/api` or `app/services`.
 
 ## 2. Backend Architecture
 
@@ -30,7 +30,7 @@ Two hard boundaries shape the whole design:
 | `schemas/` | Pydantic request/response contracts, the `ClinicalReport` structured-output contract, the error envelope | Persistence, HTTP status codes, business logic |
 | `services/` | Use-case orchestration (`AnalysisService`): input validation, coordinating `repositories/`, `document_processing/`, and `ai/` to move an analysis through its lifecycle | HTTP concerns, raw SQL, provider-specific extraction/AI code |
 | `repositories/` | Translating between domain objects and SQL rows/queries via SQLAlchemy `Session` | Business rules (e.g. which status transitions are legal), request/response shaping |
-| `document_processing/` | Turning raw bytes into normalized text: the `DocumentProcessor` interface and its `TextProcessor`/`PDFProcessor` implementations (`ImageProcessor` is a stub pending OCR) | HTTP, persistence, clinical interpretation |
+| `document_processing/` | Turning raw bytes into normalized text: the `DocumentProcessor` interface (`TextProcessor`, `PDFProcessor`, `ImageProcessor`) and the `OCREngine` interface it depends on for scanned/image content (one implementation: local Tesseract) | HTTP, persistence, clinical interpretation, any specific OCR/LLM vendor |
 | `ai/` | Interfaces for clinical extraction/report generation/output validation (implementations live in top-level `ml/`) | HTTP, persistence, OCR/text extraction |
 | `main.py` | FastAPI app construction: middleware, exception handler registration, router mounting | Route logic, business logic |
 
@@ -194,20 +194,21 @@ Design notes:
 
 ## 6. AI/ML Architecture
 
-Neither `app/document_processing/interfaces.py` nor `app/ai/interfaces.py` import FastAPI, SQLAlchemy, or any provider SDK — they are pure Python `ABC`s so `AnalysisService` can depend on a contract, never a vendor. `document_processing` is now implemented (see §8); `ai` is still interfaces only.
+Neither `app/document_processing/interfaces.py` nor `app/ai/interfaces.py` import FastAPI, SQLAlchemy, or any provider SDK — they are pure Python `ABC`s so `AnalysisService` can depend on a contract, never a vendor. `document_processing` (including OCR) is now fully implemented (see §8); `ai` — the LLM/clinical-analysis boundary — is still interfaces only.
 
 ```
-raw bytes ──(document_processing)──► normalized text ──(ai)──► ClinicalReport
+raw bytes ──(document_processing, incl. OCR)──► normalized text ──(ai)──► ClinicalReport
 ```
 
 | Interface | Module | Input → Output | Failure mode |
 |---|---|---|---|
-| `DocumentProcessor` (`TextProcessor`, `PDFProcessor`; `ImageProcessor` stub) | `document_processing` | raw bytes → `NormalizedDocument` | `EmptyInputError`, `CorruptedFileError`, `OCRNotImplementedError` (image, for now) |
+| `DocumentProcessor` (`TextProcessor`, `PDFProcessor`, `ImageProcessor`) | `document_processing` | raw bytes → `NormalizedDocument` | `EmptyInputError`, `CorruptedFileError`, `OCRFailedError` |
+| `OCREngine` (one implementation: `TesseractOCREngine`) | `document_processing` | image bytes → `OCRResult` | `OCRFailedError` |
 | `ClinicalInformationExtractor` | `ai` | normalized text → `ClinicalExtractionResult` (loose intermediate representation) | `AIProcessingError` |
 | `ClinicalReportGenerator` | `ai` | `ClinicalExtractionResult` + text → `ClinicalReport` (raw, not yet trusted) | `AIProcessingError` |
 | `StructuredOutputValidator` | `ai` | raw generator output → validated `ClinicalReport` | `MalformedStructuredOutputError` |
 
-`document_processing/factory.py::get_processor` dispatches on `DocumentSourceType` to the right `DocumentProcessor`. Concrete AI implementations (a specific LLM provider call) will live in the independent top-level `ml/` package (prompts, provider calls, evaluation), wired in via a factory selected by `AI_PROVIDER`/`AI_MODEL_NAME` in `app/core/config.py`. **No such AI factory or implementation exists yet** — only the `ai` interfaces and the schemas they exchange. Note also that `document_processing` is implemented but **not yet wired into `AnalysisService`** — `run_pipeline` (§4) still raises `NotImplementedError`; this phase built and unit-tested the processing layer in isolation.
+`document_processing/factory.py::get_processor` dispatches on `DocumentSourceType` to the right `DocumentProcessor`, wiring in `ocr_tesseract.py::get_default_ocr_engine()` (reads `Settings.ocr_engine`) for `PDFProcessor`/`ImageProcessor`. Concrete AI implementations (a specific LLM provider call) will live in the independent top-level `ml/` package (prompts, provider calls, evaluation), wired in via a factory selected by `AI_PROVIDER`/`AI_MODEL_NAME` in `app/core/config.py`. **No such AI factory or implementation exists yet** — only the `ai` interfaces and the schemas they exchange. Note also that `document_processing` — OCR included — is fully implemented but **not yet wired into `AnalysisService`** — `run_pipeline` (§4) still raises `NotImplementedError`; this phase built and unit-tested the processing layer standalone.
 
 `StructuredOutputValidator` is a deliberate, separate stage rather than trusting whatever `ClinicalReportGenerator` returns: every provider implementation's output — regardless of how well-behaved the provider's "JSON mode" claims to be — passes through the same schema gate before it can be persisted or trusted, and validator implementations may perform bounded structural repair (type coercion, moving unparsable fields to `missing_information`) but must never fabricate clinical content to satisfy the schema.
 
@@ -236,20 +237,50 @@ The frontend is expected to render `inferred`/non-`HIGH` content visibly differe
 ## 8. Document-Processing Architecture
 
 ```
-input (text | image | pdf)
-  → validation (type, size — app/services/analysis_service.py, before persistence)
-  → DocumentProcessor.process() (app/document_processing, per source_type)
-  → NormalizedDocument (text, page_count, warnings, confidence, requires_ocr)
-  → AI extraction (app/ai interfaces — not yet implemented; not yet wired to this layer either)
+TXT   → TextProcessor ─────────────────────────────────────────► NormalizedDocument
+PDF   → PDFProcessor  → native text (pypdf), per page
+                          │
+                          ├─ page has usable text ─────────────► kept as-is
+                          └─ page has none ─► OCREngine.recognize(page image) ─► NormalizedDocument
+IMAGE → ImageProcessor → OCREngine.recognize(image) ───────────► NormalizedDocument
 ```
 
-`app/document_processing/interfaces.py` defines `DocumentProcessor` (one method: `process(raw_bytes) -> NormalizedDocument`) and the `NormalizedDocument`/`ExtractionWarning`/`ExtractionConfidence` models every implementation shares. `factory.py::get_processor(source_type)` dispatches to the right one:
+`app/document_processing/interfaces.py` defines `DocumentProcessor` (one method: `process(raw_bytes) -> NormalizedDocument`), the `NormalizedDocument`/`ExtractionWarning`/`ExtractionConfidence` models every implementation shares, and — new this phase — `OCREngine` (one method: `recognize(image_bytes) -> OCRResult`) and `OCRResult`. `factory.py::get_processor(source_type)` dispatches to the right processor, wiring `PDFProcessor`/`ImageProcessor` with `ocr_tesseract.py::get_default_ocr_engine()`:
 
-- **TEXT** (`text_processor.TextProcessor`) — no extraction needed, decodes UTF-8 and normalizes whitespace (`normalization.py`); the submitted text *is* the document. Empty/whitespace-only input raises `EmptyInputError`; invalid UTF-8 raises `CorruptedFileError`.
-- **PDF** (`pdf_processor.PDFProcessor`) — extracts each page's native text layer via `pypdf`; a page with no text is *not* an error, it's recorded as a `PAGE_HAS_NO_TEXT` warning, and if **every** page has none, the result comes back with `requires_ocr=True` and a `NO_EXTRACTABLE_TEXT` warning rather than pretending extraction succeeded. Zero pages raises `EmptyInputError`; a file `pypdf` can't parse raises `CorruptedFileError`. **No OCR fallback exists yet** — a scanned/image-only PDF correctly comes back flagged `requires_ocr=True`, it is not processed further in this phase.
-- **IMAGE** (`image_processor.ImageProcessor`) — stub. `get_processor` returns an instance (processor *selection* always succeeds), but calling `.process()` always raises `OCRNotImplementedError` — actual OCR is a later phase (see `docs/decisions/004-ai-ml.md`). When OCR is implemented, `ImageProcessor.process()` gets a real body returning a `NormalizedDocument` exactly like the other two — no interface change, no caller changes. The same OCR engine would also plug into `PDFProcessor`'s scanned-page case, since both problems ("no native text layer here") reduce to the same `raw_bytes -> NormalizedDocument` shape.
+- **TEXT** (`text_processor.TextProcessor`) — unchanged: decodes UTF-8, normalizes whitespace, no OCR involved.
+- **PDF** (`pdf_processor.PDFProcessor`) — for each page, native text (via `pypdf`) is used if present; only a page with **no** native text is routed to OCR, via that page's embedded image (`page.images`, already part of `pypdf` — no separate PDF-rendering library needed, verified against a synthetic scanned-style PDF). Native and OCR'd pages are combined in original page order regardless of source. `PDFProcessor(ocr_engine=None)` (the default when constructed directly, e.g. in tests) preserves the pre-OCR behavior exactly — a page with no native text is just flagged, never sent anywhere; `factory.get_processor(PDF)` always supplies the real engine, so OCR fallback is what actually runs in practice.
+- **IMAGE** (`image_processor.ImageProcessor`) — now fully implemented: validates the image (Pillow decode; unreadable/unsupported → `CorruptedFileError`, never a raw Pillow exception), applies the pre-OCR quality heuristic (`image_quality.py`), calls the injected `OCREngine`, normalizes the result. Unlike `PDFProcessor`, there is no native-text fallback — an `OCREngine` failure here propagates as `OCRFailedError` rather than becoming a warning, since there's nothing left to degrade to.
 
-The document-processing layer has zero FastAPI/SQLAlchemy imports (see interface module docstrings). It is fully implemented and unit-tested (`backend/tests/document_processing/`) but **not yet called by `AnalysisService`** — wiring it into `run_pipeline` (§4) is deliberately out of scope for this phase, which built and validated the processing layer standalone first.
+### OCR Architecture
+
+One engine implementation exists: `ocr_tesseract.py::TesseractOCREngine`, wrapping the local, offline Tesseract binary via `pytesseract` — no network call, nothing leaves the machine. See [`docs/decisions/007-ocr.md`](../decisions/007-ocr.md) for the full comparison against EasyOCR/PaddleOCR/docTR/TrOCR/cloud OCR and why Tesseract was chosen (dependency size, zero external service, trivial Docker/Linux install, deterministic testability). `ImageProcessor`/`PDFProcessor` depend only on the `OCREngine` interface — swapping engines is a one-class change plus a `Settings.ocr_engine` value, never a change to either processor.
+
+**Scanned-PDF support — what's actually covered.** `PDFProcessor`'s OCR fallback works by extracting each textless page's embedded raster image(s) via `pypdf`'s `page.images` (no separate PDF-rendering dependency — see [007-ocr.md](../decisions/007-ocr.md) "Alternatives"). This is **not** a general PDF-rendering engine, and does not guarantee results for every possible scanned PDF:
+
+- **Covered**: the dominant real-world case — a page whose scan is one or more raster image XObjects placed directly on the page (including one level of nesting inside a Form XObject, as produced by common PDF-generation tools) — with or without a page-level `/Rotate` value.
+- **Page rotation is corrected**: a PDF page's `/Rotate` attribute (always a multiple of 90°) is a *display* instruction that `page.images` does **not** apply to the raw bytes it returns — verified empirically: an uncorrected sideways scan OCR'd as garbled, low-confidence text against the real Tesseract engine, and rotating the extracted image by exactly `page.rotation` degrees (`Image.rotate(page.rotation, expand=True)` — not the seemingly more intuitive negated value; confirmed by testing both directions) fixed it. `PDFProcessor._ocr_page` applies this correction before every OCR call.
+- **Not covered**: text rendered as vector paths rather than a raster image (there's no image to extract at all — falls through to the ordinary "no text found" path, not a crash, just no OCR possible); a scan that is skewed/crooked at the pixel level independent of any page-level `/Rotate` (not detected or corrected — this is a genuine, undocumented-elsewhere limitation, not silently pretended away); multiple embedded images per page are all OCR'd and concatenated with no scan-region detection, so an incidental small image (e.g. a logo) contributes whatever (likely empty or noisy) text Tesseract finds in it.
+- **Future replacement path**: `PDFProcessor` only ever hands `OCREngine.recognize(image_bytes: bytes)` a plain image — replacing *how that image is obtained* (e.g. swapping `page.images` for a full page-rendering library like PyMuPDF or `pdf2image`, which would also resolve the vector-text and pixel-skew gaps above) requires changing only `PDFProcessor._ocr_page`'s internals. `OCREngine` and `ImageProcessor` are unaffected either way.
+
+**Confidence**: Tesseract reports a real per-word 0-100 confidence score; `_bucket_confidence` deterministically averages and buckets it into the existing qualitative `ExtractionConfidence` model (`HIGH` ≥ 80, `MEDIUM` ≥ 50, else `LOW`; `None` when nothing was recognized) — no confidence number is invented, and no second numeric field was added to `NormalizedDocument`.
+
+**Partial extraction is never silently reported as fully reliable.** `NormalizedDocument.confidence` at the whole-document level answers one specific, coarse question — "did every page end up with *some* text?" (`HIGH` if yes, `MEDIUM` if some pages have none, `None` if none do) — it is **not** an aggregate of every page's individual OCR quality. A document where every page produced *some* text, but one page's OCR was itself low-confidence (or failed and recovered nothing, or hit `IMAGE_QUALITY_LOW`), still surfaces that fact — just via `warnings` (`OCR_LOW_CONFIDENCE`, `OCR_FAILED`, `IMAGE_QUALITY_LOW`), not by further downgrading the top-level `confidence` enum. A caller must read `confidence` **and** `warnings` **and** `requires_ocr` together; none of the three in isolation claims the extraction is complete or reliable on its own.
+
+**Handwriting**: Tesseract is a printed-text engine; handwriting accuracy is not reliable and is not claimed as supported. Every non-empty OCR result carries `HANDWRITING_MAY_REQUIRE_SPECIALIZED_MODEL` — an honest, permanent disclaimer of *this engine's* limitation (there is no handwriting-vs-printed detection), attached by the engine itself so a future handwriting-capable `OCREngine` simply wouldn't emit it.
+
+**Warnings** (`ExtractionWarning.code`), only ever emitted when the implementation actually justifies them:
+
+| Code | Emitted by | Meaning |
+|---|---|---|
+| `OCR_USED` | `ImageProcessor`, `PDFProcessor` | This text came from OCR, not (for a PDF page) a native text layer — provenance, not a problem. |
+| `OCR_LOW_CONFIDENCE` | `TesseractOCREngine` | The engine's own average per-word confidence bucketed to `LOW`. |
+| `IMAGE_QUALITY_LOW` | `image_quality.py` (used by both processors) | Image is below a documented minimum pixel-dimension threshold — assessed *before* OCR runs, independent of the engine's confidence. |
+| `PAGE_HAS_NO_TEXT` | `PDFProcessor`, `ImageProcessor` | No text found on this page/image, native or OCR. |
+| `OCR_FAILED` | `PDFProcessor` (per page, as a warning) | OCR failed for one page of a multi-page PDF — does not abort the rest of the document, unlike `ImageProcessor`, where the same failure has no page to fall back to and raises `OCRFailedError` instead. |
+| `NO_EXTRACTABLE_TEXT` | `PDFProcessor` | No page in the whole document yielded any text, native or OCR. |
+| `HANDWRITING_MAY_REQUIRE_SPECIALIZED_MODEL` | `TesseractOCREngine` | See "Handwriting" above. |
+
+The document-processing layer has zero FastAPI/SQLAlchemy imports (see interface module docstrings) and makes no LLM/AI provider call. It is fully implemented and unit-tested (`backend/tests/document_processing/`, `FakeOCREngine` standing in for the real engine — see `docs/testing/README.md`) but **not yet called by `AnalysisService`** — wiring it into `run_pipeline` (§4) remains deliberately out of scope; this phase built and validated the processing layer, OCR included, standalone.
 
 ## 9. Error Architecture
 

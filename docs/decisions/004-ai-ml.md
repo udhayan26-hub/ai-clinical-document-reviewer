@@ -8,7 +8,7 @@ The system must run clinical analysis via *some* AI/ML approach, but the specifi
 
 Define the AI/ML pipeline purely as interfaces in this phase — `DocumentProcessor` (`backend/app/document_processing/interfaces.py`), and `ClinicalInformationExtractor`, `ClinicalReportGenerator`, `StructuredOutputValidator` (`backend/app/ai/interfaces.py`) — with zero provider SDK code. Concrete implementations will live behind these interfaces, with pipeline-specific logic (prompts, provider calls, evaluation) isolated in the independent top-level `ml/` package, selected via `AI_PROVIDER`/`AI_MODEL_NAME` settings.
 
-> **Update (document-processing foundation phase):** `DocumentProcessor` now has real, non-LLM implementations — `TextProcessor` and `PDFProcessor` (no external service, no AI/OCR provider involved; `ImageProcessor` remains a stub pending OCR). This doesn't change the decision above: `ai/interfaces.py` (the actual AI/ML/LLM boundary this ADR is about) is still interfaces only, with no provider selected or called anywhere.
+> **Update (document-processing foundation phase):** `DocumentProcessor` now has real implementations — `TextProcessor`, `PDFProcessor`, and `ImageProcessor` (the latter two via a local, offline `OCREngine`; see [007-ocr.md](007-ocr.md)). None of this involves an LLM or any external service. This doesn't change the decision above: `ai/interfaces.py` (the actual AI/ML/LLM boundary this ADR is about) is still interfaces only, with no provider selected or called anywhere.
 
 ## Rationale
 

@@ -12,8 +12,9 @@ flowchart TB
 
         subgraph DocProc["Document Processing\napp/document_processing"]
             TXT["TextProcessor\n(plain text)"]
-            PDFP["PDFProcessor\n(typed-text PDFs;\nflags requires_ocr otherwise)"]
-            IMG["ImageProcessor (stub)\nOCR — not yet implemented"]
+            PDFP["PDFProcessor\n(native text via pypdf,\nper page; OCR fallback\nfor pages with none)"]
+            IMG["ImageProcessor\n(validates image,\ndelegates to OCREngine)"]
+            OCR["OCREngine\n(TesseractOCREngine —\nlocal Tesseract binary,\nno external service)"]
         end
 
         subgraph AI["AI / ML layer\napp/ai (interfaces) + ml/ (implementations)"]
@@ -34,10 +35,14 @@ flowchart TB
     REPO <--> DB
 
     SVC -->|"raw file bytes"| STORAGE
-    SVC -->|"route by source_type\n(document_processing/factory.py)"| DocProc
+    SVC -->|"route by source_type\n(document_processing/factory.py)\n[not yet wired to SVC — see §8]"| DocProc
     TXT -->|"NormalizedDocument"| SVC
     PDFP -->|"NormalizedDocument"| SVC
-    IMG -.->|"OCRNotImplementedError\n(stub, not wired up)"| SVC
+    IMG -->|"NormalizedDocument"| SVC
+    PDFP -.->|"page image\n(only if page has\nno native text)"| OCR
+    IMG -->|"image bytes"| OCR
+    OCR -->|"OCRResult"| PDFP
+    OCR -->|"OCRResult"| IMG
 
     SVC -->|"normalized text"| AI
     CIE --> CRG

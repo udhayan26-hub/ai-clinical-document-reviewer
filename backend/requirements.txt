@@ -13,6 +13,8 @@ psycopg2-binary
 
 # --- Document processing ---
 pypdf
+pillow
+pytesseract  # thin wrapper around the system tesseract-ocr binary (see backend/Dockerfile)
 
 # --- Testing ---
 pytest

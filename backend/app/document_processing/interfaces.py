@@ -1,16 +1,22 @@
 """Document-processing contracts.
 
 This module defines the `DocumentProcessor` abstraction and the
-`NormalizedDocument` representation every concrete processor produces.
-It must NOT depend on FastAPI, SQLAlchemy, or any AI/ML provider — it is
-pure document-handling, called by the (not-yet-wired) services layer,
-never by API route handlers directly.
+`NormalizedDocument` representation every concrete processor produces,
+plus the `OCREngine` abstraction that `ImageProcessor` and `PDFProcessor`
+depend on for scanned/image content. It must NOT depend on FastAPI,
+SQLAlchemy, or any AI/ML (LLM) provider — it is pure document-handling,
+called by the (not-yet-wired) services layer, never by API route
+handlers directly.
 
 Concrete processors (`text_processor.TextProcessor`,
 `pdf_processor.PDFProcessor`, `image_processor.ImageProcessor`) all
 implement this same interface so callers can treat any document type
 uniformly: `processor.process(raw_bytes) -> NormalizedDocument`. See
-`factory.get_processor` for source-type-based dispatch.
+`factory.get_processor` for source-type-based dispatch, and
+`ocr_tesseract.py` for the one concrete `OCREngine` implementation —
+`ImageProcessor`/`PDFProcessor` depend only on the `OCREngine` interface
+below, never on `pytesseract` or any other OCR library directly, so the
+engine can be swapped without touching either processor.
 """
 
 from abc import ABC, abstractmethod
@@ -78,5 +84,43 @@ class DocumentProcessor(ABC):
         input, `CorruptedFileError` if the bytes cannot be parsed as this
         processor's expected format, or a more specific subclass of
         `AppError` for other domain-specific failures.
+        """
+        raise NotImplementedError
+
+
+class OCRResult(BaseModel):
+    """Raw output of one `OCREngine.recognize()` call — one image in,
+    one page/image's worth of text out. Deliberately smaller than
+    `NormalizedDocument`: it has no `document_type` or `page_count`
+    because a single OCR call doesn't know about the document it's part
+    of — `ImageProcessor`/`PDFProcessor` fold this into a
+    `NormalizedDocument` and add their own pipeline-level warnings
+    (e.g. `OCR_USED`) on top of whatever `warnings` the engine itself
+    reports (e.g. `OCR_LOW_CONFIDENCE`).
+    """
+
+    text: str = Field(default="", description="Recognized text; empty if nothing was detected.")
+    confidence: ExtractionConfidence | None = Field(
+        default=None, description="Null when no text was detected — nothing to grade."
+    )
+    warnings: list[ExtractionWarning] = Field(default_factory=list)
+
+
+class OCREngine(ABC):
+    """A pluggable OCR backend. `ImageProcessor` and `PDFProcessor` (for
+    pages with no native text layer) depend on this interface only —
+    never on a specific OCR library — so the engine can be replaced
+    (a different local engine, or eventually a cloud OCR/vision service)
+    without changing either processor or the `NormalizedDocument`
+    contract they produce.
+    """
+
+    @abstractmethod
+    def recognize(self, image_bytes: bytes) -> OCRResult:
+        """Run OCR on a single image and return its text. Raise
+        `app.core.exceptions.OCRFailedError` if recognition fails
+        outright (the engine is unavailable, the image can't be decoded,
+        etc.) — a merely empty/low-confidence result is not a failure
+        and must be returned as a normal `OCRResult`, not raised.
         """
         raise NotImplementedError

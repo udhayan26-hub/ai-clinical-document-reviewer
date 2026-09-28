@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     ai_api_key: str = "changeme"
     ai_api_base_url: str = ""
 
+    # OCR is a separate, local/offline concern from the AI_PROVIDER above —
+    # see docs/decisions/007-ocr.md. "tesseract" is the only value
+    # implemented today; the setting exists so swapping engines later is a
+    # config change, not a code change.
+    ocr_engine: str = "tesseract"
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]

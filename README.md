@@ -2,7 +2,7 @@
 
 An end-to-end AI/ML application that ingests clinical documentation (plain text, images, or PDFs — typed, scanned, or handwritten), extracts relevant clinical information, runs AI/ML-based clinical analysis, and produces a structured clinical report.
 
-> **Status:** Backend architecture, persistence, and document processing (plain text, PDF text extraction, and OCR for images/scanned PDFs via local Tesseract) are implemented and unit-tested. The AI/ML clinical-analysis pipeline is **not yet implemented**, and document processing is not yet wired into the API — see [Current Project Status](#current-project-status) and [Roadmap](#roadmap).
+> **Status:** Backend architecture, persistence, document processing (plain text, PDF text extraction, OCR via local Tesseract), and the AI/ML pipeline (EXTRACT → GENERATE → VALIDATE) are implemented and tested — including a real `AIProvider` (`OpenAICompatibleProvider`) callable via `POST /api/v1/analyses`, configured entirely by environment variables (`AI_PROVIDER=openai`, `AI_MODEL_NAME`, `AI_API_KEY`, optional `AI_API_BASE_URL`). Without a configured key, requests fail cleanly rather than fabricating a report. No background job queue exists yet, so the endpoint blocks synchronously on processing. See [Current Project Status](#current-project-status) and [Roadmap](#roadmap).
 
 > **Note:** All clinical data used in this project (`synthetic-data/`) is synthetic. No real patient data is used at any stage.
 
@@ -22,7 +22,7 @@ User → React frontend → FastAPI backend → document processing (OCR/text ex
 
 Full detail, including backend module responsibilities, the versioned REST API contract, the processing-status state machine, database schema, AI/ML interfaces, the structured report contract, and the error-response format, is in **[`docs/architecture/system-architecture.md`](docs/architecture/system-architecture.md)**, with a component diagram at [`docs/architecture/architecture-diagram.mmd`](docs/architecture/architecture-diagram.mmd).
 
-Why each major technology/design choice was made is recorded in [`docs/decisions/`](docs/decisions) (ADRs 001–007: frontend, backend, database, AI/ML, storage, deployment, OCR).
+Why each major technology/design choice was made is recorded in [`docs/decisions/`](docs/decisions) (ADRs 001–008: frontend, backend, database, AI/ML, storage, deployment, OCR, AI pipeline).
 
 ## Repository Structure
 
@@ -38,10 +38,10 @@ ai-clinical-document-reviewer/
 │   │   ├── services/            use-case orchestration (AnalysisService)
 │   │   ├── repositories/        SQLAlchemy persistence per model
 │   │   ├── document_processing/ DocumentProcessor: TextProcessor, PDFProcessor, ImageProcessor + OCREngine (Tesseract)
-│   │   └── ai/                  ClinicalInformationExtractor / ClinicalReportGenerator / StructuredOutputValidator interfaces
+│   │   └── ai/                  AIProvider + ClinicalReportValidator interfaces, ClinicalAnalysisPipeline, deterministic validator, placeholder provider
 │   ├── migrations/          Alembic migrations (initial schema: 0001)
 │   └── tests/               Pytest unit/API tests
-├── ml/                    AI/ML pipeline implementations (prompts, schemas, pipeline, evaluators) — not yet implemented, see app/ai for interfaces
+├── ml/                    Reserved for a real LLM provider's prompts/implementation once one exists — see ml/README.md; contracts live in backend/app/ai/ for now
 ├── infrastructure/        Docker / AWS infrastructure definitions (AWS not yet implemented)
 ├── docs/
 │   ├── architecture/          system-architecture.md, architecture-diagram.mmd
@@ -127,17 +127,17 @@ docker compose up --build
 - Versioned REST API (`/api/v1/analyses`: create, list, get, get report) with full request/response/error contracts, backed by real persistence, validated end-to-end against a real PostgreSQL container (not just SQLite)
 - PostgreSQL schema (4 tables) as SQLAlchemy models + an Alembic migration (runs on container startup, idempotent, blocks server start on failure), portable to SQLite for fast tests
 - Processing lifecycle state machine (`PENDING → VALIDATING → EXTRACTING → ANALYZING → COMPLETED/FAILED`) defined with an explicit transition table
-- **Document processing, including OCR**: `DocumentProcessor` interface with `TextProcessor` (plain text, Unicode-safe, whitespace normalization), `PDFProcessor` (native-text-layer extraction via `pypdf`, per-page OCR fallback for pages with no native text, preserving page order), and `ImageProcessor` (validates the image, delegates to OCR). OCR is local and offline — Tesseract via `pytesseract`, no external service, no data leaves the machine (see `docs/decisions/007-ocr.md`) — behind a swappable `OCREngine` interface. Confidence is a real, engine-reported signal bucketed into the existing qualitative model, not invented; handwriting limitations are explicitly disclosed, never silently assumed away. Scanned-PDF OCR covers the dominant real-world case (embedded page images, with page-rotation correction) but is **not** a general PDF-rendering engine — see "Scanned-PDF support" in `system-architecture.md` §8 and the Limitations section of `docs/decisions/007-ocr.md` for exactly what is and isn't covered. **Not yet wired into `AnalysisService`** — built and unit-tested standalone (see `docs/architecture/system-architecture.md` §8).
-- AI/ML interfaces (no implementation) — provider-agnostic by construction
+- **Document processing, including OCR**: `DocumentProcessor` interface with `TextProcessor` (plain text, Unicode-safe, whitespace normalization), `PDFProcessor` (native-text-layer extraction via `pypdf`, per-page OCR fallback for pages with no native text, preserving page order), and `ImageProcessor` (validates the image, delegates to OCR). OCR is local and offline — Tesseract via `pytesseract`, no external service, no data leaves the machine (see `docs/decisions/007-ocr.md`) — behind a swappable `OCREngine` interface. Confidence is a real, engine-reported signal bucketed into the existing qualitative model, not invented; handwriting limitations are explicitly disclosed, never silently assumed away. Scanned-PDF OCR covers the dominant real-world case (embedded page images, with page-rotation correction) but is **not** a general PDF-rendering engine — see "Scanned-PDF support" in `system-architecture.md` §8 and the Limitations section of `docs/decisions/007-ocr.md` for exactly what is and isn't covered.
+- **AI/ML pipeline, with a real provider**: an explicit EXTRACT → GENERATE → VALIDATE pipeline (`app/ai/pipeline.py::ClinicalAnalysisPipeline`). `AIProvider` has two implementations: `UnconfiguredAIProvider` (the default — raises clearly rather than fabricating output) and `OpenAICompatibleProvider`, a real implementation calling any OpenAI-compatible `/chat/completions` endpoint via plain `httpx` (no SDK, no hard-coded vendor). Configure with `AI_PROVIDER=openai`, `AI_MODEL_NAME`, `AI_API_KEY`, optional `AI_API_BASE_URL` (see `.env.example`) — no credentials in code, and a missing key fails fast and cleanly rather than attempting a call. Validation remains a completely separate, deterministic (non-LLM) gate: every claim's evidence must be a verbatim quote from the source document, confidence can't be inflated beyond what was extracted, and a report can never be marked as not-needing-review while anything is uncertain — see `docs/decisions/008-ai-pipeline.md`.
+- **`POST /api/v1/analyses` now runs the full pipeline synchronously** — `AnalysisService.run_pipeline()` is called right after the document is persisted, and the response reflects the real final status (`COMPLETED` with a persisted report, or `FAILED` with a clear error code — e.g. `AI_EXTRACTION_FAILED` if no provider is configured, `DOCUMENT_BYTES_UNAVAILABLE` for PDF/IMAGE, whose raw bytes aren't persisted yet — see `docs/decisions/005-storage.md`) instead of always `PENDING`. There is still no background job queue, so the request blocks on document processing + the AI call — see `docs/decisions/008-ai-pipeline.md` "What Async Will Need".
 - The structured `ClinicalReport` Pydantic contract, with enforced evidence/confidence/`requires_review` rules, mirrored in TypeScript
 - Consistent error-response envelope across the API
 - Docker Compose (frontend/backend/db), Dockerfiles (backend now installs `tesseract-ocr`), lightweight CI (backend tests + frontend build)
-- 62 passing backend tests (API validation paths, report schema rules, document-processing and OCR unit tests against synthetic fixtures, OCR tested via a fake engine so no real OCR binary is required to run the suite)
+- 102 passing backend tests (API validation paths, report schema rules, document-processing/OCR, AI pipeline/validator, real-provider request/response/error handling, and full API-level pipeline integration — all deterministic; the real provider's tests mock the HTTP boundary, so no test requires an API key, network, or external LLM)
 
 **Not yet implemented (planned):**
-- Actual AI/ML clinical analysis (`ai`/`ml` implementations, provider selection)
-- Wiring `document_processing` into `AnalysisService.run_pipeline` (currently an intentional `NotImplementedError`)
-- Object storage writes (uploaded file bytes are validated but not yet persisted to disk/S3)
+- Async execution of `run_pipeline()` (background worker/job queue) — currently synchronous inside the `POST` request
+- Object storage writes (uploaded file bytes are validated but not yet persisted to disk/S3) — the reason PDF/IMAGE analyses can't currently be (re-)processed
 - Frontend UI (only TypeScript API/report types exist)
 - Authentication
 - AWS deployment
@@ -150,8 +150,10 @@ docker compose up --build
 - [x] Docker/PostgreSQL development environment validated end-to-end
 - [x] Document-processing foundation: plain text + PDF text extraction, normalized representation, unit tests
 - [x] OCR: images and scanned/mixed PDFs, via local Tesseract behind a swappable `OCREngine` interface
-- [ ] AI/ML clinical analysis pipeline implementation
-- [ ] Structured report generation wired end-to-end (pipeline execution)
+- [x] AI/ML pipeline architecture: EXTRACT→GENERATE→VALIDATE, provider abstraction, deterministic evidence-grounded validation
+- [x] Real `AIProvider` (`OpenAICompatibleProvider`) wired into `AnalysisService.run_pipeline()`, called synchronously from `POST /api/v1/analyses`
+- [ ] Async execution of `run_pipeline()` (background worker/job queue) triggered from the API
+- [ ] Object storage (unblocks re-processing PDF/IMAGE analyses)
 - [ ] Frontend application
 - [ ] Integration & end-to-end tests
 - [ ] AWS deployment

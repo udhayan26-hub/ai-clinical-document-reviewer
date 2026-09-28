@@ -1,9 +1,15 @@
-def test_create_analysis_from_text_returns_pending(client):
+def test_create_analysis_from_text_runs_pipeline_and_fails_cleanly_without_a_configured_provider(client):
+    """No AI_PROVIDER is configured in the test environment (defaults to
+    "placeholder"/UnconfiguredAIProvider) — POST now runs the full
+    pipeline synchronously, so a real provider's absence must surface as
+    a clean AI_EXTRACTION_FAILED status, never a fabricated report or a
+    still-PENDING analysis (see docs/decisions/008-ai-pipeline.md)."""
     response = client.post("/api/v1/analyses", data={"text": "Patient reports mild headache."})
 
     assert response.status_code == 201
     body = response.json()
-    assert body["status"] == "PENDING"
+    assert body["status"] == "FAILED"
+    assert body["error_code"] == "AI_EXTRACTION_FAILED"
     assert body["document"]["source_type"] == "TEXT"
     assert body["report_available"] is False
 

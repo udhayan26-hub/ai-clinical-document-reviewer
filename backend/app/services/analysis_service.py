@@ -1,27 +1,39 @@
 """Analysis orchestration service.
 
-Owns: input validation, the create/read use cases for analyses, and (once
-implemented) driving an analysis through its processing lifecycle by
-calling `app.document_processing` and `app.ai` interfaces in sequence and
+Owns: input validation, the create/read use cases for analyses, and
+driving an analysis through its processing lifecycle by calling
+`app.document_processing` and `app.ai` interfaces in sequence and
 persisting the result via `app.repositories`.
 
 Does NOT own: HTTP concerns (status codes, request parsing — that's
-`app.api`), SQL (that's `app.repositories`), or how text is actually
-extracted/analyzed (that's `app.document_processing` / `app.ai`
-implementations, not yet written).
+`app.api`), SQL (that's `app.repositories`), how text is actually
+extracted (that's `app.document_processing` implementations), or how
+clinical analysis is actually performed (that's `app.ai.pipeline` and
+the configured `AIProvider`/`ClinicalReportValidator`).
 
-`run_pipeline` is the seam where the real document-processing and AI/ML
-work will be wired in; it is intentionally unimplemented in this phase.
+`run_pipeline` is the seam where document-processing and the AI/ML
+pipeline are wired in. `POST /api/v1/analyses` now calls it synchronously
+after `create_analysis` — there is no background job queue yet, so that
+request blocks on document processing + the AI provider call (see
+docs/decisions/008-ai-pipeline.md "What Async Will Need"). It never
+raises: any failure is reflected as `Analysis.status == FAILED`.
 """
 
 import hashlib
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from app.ai.factory import get_default_ai_provider, get_default_validator
+from app.ai.interfaces import AIProvider, ClinicalReportValidator
+from app.ai.pipeline import ClinicalAnalysisPipeline
+from app.ai.schemas import PipelineResult
 from app.core.config import get_settings
-from app.core.enums import AnalysisStatus, DocumentSourceType, ProcessingEventType
+from app.core.enums import ANALYSIS_STATUS_TRANSITIONS, AnalysisStatus, DocumentSourceType, ProcessingEventType
 from app.core.exceptions import (
+    AppError,
+    DocumentBytesUnavailableError,
     EmptyInputError,
     FileTooLargeError,
     ResourceNotFoundError,
@@ -29,6 +41,8 @@ from app.core.exceptions import (
     UnsupportedFileTypeError,
     ValidationFailedError,
 )
+from app.document_processing.interfaces import NormalizedDocument
+from app.document_processing.text_processor import TextProcessor
 from app.models.analysis import Analysis
 from app.models.clinical_report import ClinicalReport
 from app.models.document import Document
@@ -50,13 +64,26 @@ SUPPORTED_FILE_CONTENT_TYPES: dict[str, DocumentSourceType] = {
 
 
 class AnalysisService:
-    def __init__(self, db: Session) -> None:
+    def __init__(
+        self,
+        db: Session,
+        *,
+        ai_provider: AIProvider | None = None,
+        ai_validator: ClinicalReportValidator | None = None,
+    ) -> None:
         self.db = db
         self.documents = DocumentRepository(db)
         self.analyses = AnalysisRepository(db)
         self.reports = ClinicalReportRepository(db)
         self.events = ProcessingEventRepository(db)
         self.settings = get_settings()
+        # Overridable so tests can inject a deterministic FakeAIProvider
+        # without going through app.ai.factory's real-config-driven default.
+        # Resolved lazily (in run_pipeline, not here) so a misconfigured
+        # AI_PROVIDER only breaks analysis *processing* — never unrelated
+        # calls like get_analysis/list_analyses, which don't need it.
+        self._ai_provider_override = ai_provider
+        self._ai_validator_override = ai_validator
 
     # ---- Use cases ------------------------------------------------------
 
@@ -141,16 +168,133 @@ class AnalysisService:
             raise ResourceNotFoundError(f"No report found for completed analysis '{analysis_id}'.")
         return report
 
-    def run_pipeline(self, analysis_id: uuid.UUID) -> None:
+    def run_pipeline(self, analysis_id: uuid.UUID) -> Analysis:
         """Drive one analysis through VALIDATING -> EXTRACTING -> ANALYZING
-        -> COMPLETED/FAILED by calling `app.document_processing` and
-        `app.ai` interfaces, recording a ProcessingEvent at each
-        transition. Intentionally not implemented in this phase — see
-        docs/architecture/system-architecture.md, "Processing Lifecycle".
+        -> COMPLETED/FAILED, recording a ProcessingEvent at every
+        transition. Never raises: any failure at any stage is caught and
+        recorded as AnalysisStatus.FAILED with a safe error_code/message —
+        callers should inspect the returned Analysis, not a try/except.
+
+        Called synchronously from `POST /api/v1/analyses` (see
+        `app.api.v1.analyses.create_analysis`) — there is no background
+        job queue, so the request blocks on this. Also callable directly
+        (e.g. from a script or a test).
         """
-        raise NotImplementedError(
-            "Pipeline execution is not implemented yet; analyses currently remain PENDING."
+        analysis = self.get_analysis(analysis_id)
+        try:
+            # Resolved here, not in __init__, so a misconfigured AI_PROVIDER
+            # only fails analysis *processing* — get_analysis/list_analyses
+            # never touch this and are unaffected.
+            provider = self._ai_provider_override or get_default_ai_provider()
+            validator = self._ai_validator_override or get_default_validator()
+
+            self._transition(analysis, AnalysisStatus.VALIDATING, ProcessingEventType.STATUS_CHANGED, "Validating document for processing.")
+
+            self._transition(
+                analysis, AnalysisStatus.EXTRACTING, ProcessingEventType.EXTRACTION_STARTED, "Extracting normalized text from document."
+            )
+            normalized = self._build_normalized_document(analysis)
+            self._record_event(
+                analysis,
+                ProcessingEventType.EXTRACTION_COMPLETED,
+                "Document text extraction completed.",
+                {"document_type": normalized.document_type.value, "requires_ocr": str(normalized.requires_ocr)},
+            )
+
+            self._transition(
+                analysis,
+                AnalysisStatus.ANALYZING,
+                ProcessingEventType.AI_ANALYSIS_STARTED,
+                "Running AI/ML clinical analysis pipeline.",
+                {"provider": type(provider).__name__},
+            )
+            pipeline = ClinicalAnalysisPipeline(provider, validator)
+            result = pipeline.run(normalized)
+
+            self._persist_report(analysis, result)
+            self._record_event(
+                analysis,
+                ProcessingEventType.AI_ANALYSIS_COMPLETED,
+                "AI/ML clinical analysis completed.",
+                {"fact_count": str(len(result.extraction.facts)), "issue_count": str(len(result.validation.issues))},
+            )
+            self._record_event(analysis, ProcessingEventType.REPORT_PERSISTED, "Clinical report persisted.")
+
+            self._transition(analysis, AnalysisStatus.COMPLETED, ProcessingEventType.STATUS_CHANGED, "Analysis completed.")
+        except AppError as exc:
+            self._fail(analysis, exc)
+        except Exception:
+            # Never let an unexpected internal exception escape this method
+            # or leak its details into persisted state — see
+            # docs/architecture/system-architecture.md "Error Architecture".
+            self._fail(analysis, AppError("An unexpected internal error occurred."))
+
+        return analysis
+
+    def _build_normalized_document(self, analysis: Analysis) -> NormalizedDocument:
+        document = analysis.document
+        if document.source_type == DocumentSourceType.TEXT:
+            if not analysis.extracted_text:
+                raise DocumentBytesUnavailableError("No text content is stored for this analysis.")
+            return TextProcessor().process(analysis.extracted_text.encode("utf-8"))
+        raise DocumentBytesUnavailableError(
+            f"Raw {document.source_type.value} file bytes were not persisted at upload time "
+            "(object storage is not implemented yet — see docs/decisions/005-storage.md); "
+            "this analysis cannot be re-processed until that exists."
         )
+
+    def _persist_report(self, analysis: Analysis, result: PipelineResult) -> None:
+        validated_report = result.validation.report
+        assert validated_report is not None  # guaranteed: PipelineResult is only returned when VALID
+        self.reports.create(
+            ClinicalReport(
+                analysis=analysis,
+                structured_data=validated_report.model_dump(mode="json"),
+                report_summary=validated_report.report_summary,
+                requires_review=validated_report.requires_review,
+                ai_provider=self.settings.ai_provider,
+                ai_model_name=self.settings.ai_model_name,
+                generated_at=datetime.now(timezone.utc),
+            )
+        )
+        self.db.commit()
+
+    def _transition(
+        self,
+        analysis: Analysis,
+        new_status: AnalysisStatus,
+        event_type: ProcessingEventType,
+        message: str,
+        metadata: dict[str, str] | None = None,
+    ) -> None:
+        if new_status not in ANALYSIS_STATUS_TRANSITIONS[analysis.status]:
+            raise AppError(f"Illegal status transition from {analysis.status.value} to {new_status.value}.")
+        if analysis.started_at is None and new_status == AnalysisStatus.VALIDATING:
+            analysis.started_at = datetime.now(timezone.utc)
+        if new_status == AnalysisStatus.COMPLETED:
+            analysis.completed_at = datetime.now(timezone.utc)
+        analysis.status = new_status
+        self._record_event(analysis, event_type, message, metadata)
+
+    def _record_event(
+        self, analysis: Analysis, event_type: ProcessingEventType, message: str, metadata: dict[str, str] | None = None
+    ) -> None:
+        self.events.create(
+            ProcessingEvent(analysis=analysis, event_type=event_type, message=message, event_metadata=metadata)
+        )
+        self.db.commit()
+
+    def _fail(self, analysis: Analysis, exc: AppError) -> None:
+        event_type = {
+            AnalysisStatus.VALIDATING: ProcessingEventType.VALIDATION_FAILED,
+            AnalysisStatus.EXTRACTING: ProcessingEventType.EXTRACTION_FAILED,
+            AnalysisStatus.ANALYZING: ProcessingEventType.AI_ANALYSIS_FAILED,
+        }.get(analysis.status, ProcessingEventType.ERROR)
+        analysis.status = AnalysisStatus.FAILED
+        analysis.error_code = exc.code
+        analysis.error_message = exc.message
+        analysis.completed_at = datetime.now(timezone.utc)
+        self._record_event(analysis, event_type, exc.message, {"error_code": exc.code})
 
     # ---- Validation helpers ----------------------------------------------
 

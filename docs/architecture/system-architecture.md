@@ -31,7 +31,7 @@ Two hard boundaries shape the whole design:
 | `services/` | Use-case orchestration (`AnalysisService`): input validation, coordinating `repositories/`, `document_processing/`, and `ai/` to move an analysis through its lifecycle | HTTP concerns, raw SQL, provider-specific extraction/AI code |
 | `repositories/` | Translating between domain objects and SQL rows/queries via SQLAlchemy `Session` | Business rules (e.g. which status transitions are legal), request/response shaping |
 | `document_processing/` | Turning raw bytes into normalized text: the `DocumentProcessor` interface (`TextProcessor`, `PDFProcessor`, `ImageProcessor`) and the `OCREngine` interface it depends on for scanned/image content (one implementation: local Tesseract) | HTTP, persistence, clinical interpretation, any specific OCR/LLM vendor |
-| `ai/` | Interfaces for clinical extraction/report generation/output validation (implementations live in top-level `ml/`) | HTTP, persistence, OCR/text extraction |
+| `ai/` | The `AIProvider`/`ClinicalReportValidator` interfaces, the EXTRACT→GENERATE→VALIDATE pipeline orchestrator, the one deterministic validator, and the one (deliberately non-functional) placeholder provider | HTTP, persistence, OCR/text extraction, any specific LLM vendor |
 | `main.py` | FastAPI app construction: middleware, exception handler registration, router mounting | Route logic, business logic |
 
 Dependency direction is one-way: `api` → `services` → (`repositories` + `document_processing` + `ai`) → `models`/`core`. Nothing below `services` may import from `api`.
@@ -118,13 +118,13 @@ stateDiagram-v2
 - **PENDING** — analysis record created and persisted; not yet picked up for processing.
 - **VALIDATING** — confirming the stored document is readable/well-formed (distinct from the request-level validation in §3, which happens before an Analysis row even exists).
 - **EXTRACTING** — the `DocumentProcessor` for the document's `source_type` (`app/document_processing/factory.py::get_processor`) runs to produce a `NormalizedDocument`.
-- **ANALYZING** — `ai` interfaces run (`ClinicalInformationExtractor` → `ClinicalReportGenerator` → `StructuredOutputValidator`) against the normalized text.
+- **ANALYZING** — the AI/ML pipeline runs against the normalized text: EXTRACT (`AIProvider.extract`) → GENERATE (`AIProvider.generate`) → VALIDATE (`ClinicalReportValidator.validate`, deterministic, non-LLM). All three sub-stages happen within this one `AnalysisStatus`; they are not separate top-level statuses (see `app.ai.pipeline.ClinicalAnalysisPipeline` and [008-ai-pipeline.md](../decisions/008-ai-pipeline.md) — the ProcessingEvent audit trail distinguishes them via `event_metadata`, not new enum values).
 - **COMPLETED** — a validated `ClinicalReport` has been persisted; terminal.
 - **FAILED** — terminal; `Analysis.error_code`/`error_message` are set. Reachable from any non-terminal state.
 
-`COMPLETED` and `FAILED` have no outgoing transitions. The allow-listed transition table lives in `app/core/enums.py::ANALYSIS_STATUS_TRANSITIONS` so the (not-yet-implemented) pipeline runner has a single source of truth to validate against rather than hand-checking strings.
+`COMPLETED` and `FAILED` have no outgoing transitions. The allow-listed transition table lives in `app/core/enums.py::ANALYSIS_STATUS_TRANSITIONS`, and `AnalysisService.run_pipeline()` validates every transition against it before applying one.
 
-Every transition is (will be) recorded as an immutable `ProcessingEvent` row — the audit trail is additive, `Analysis.status` is the current-state pointer. This phase implements record creation (`PENDING` + one `STATUS_CHANGED` event) only; `AnalysisService.run_pipeline` is the documented, not-yet-implemented seam for driving the remaining transitions (see its docstring).
+Every transition is recorded as an immutable `ProcessingEvent` row — the audit trail is additive, `Analysis.status` is the current-state pointer. `run_pipeline()` is now a complete, real implementation driving PENDING all the way to COMPLETED/FAILED (previous phases implemented only the initial `PENDING` + `STATUS_CHANGED` event, created at `POST /analyses` time). It is not yet called by any API endpoint — see §6 "Provider Status" and [008-ai-pipeline.md](../decisions/008-ai-pipeline.md) design decision 6 for why (no async job infrastructure exists yet to avoid blocking the request on OCR + an AI provider call) — but it is directly callable and is exercised end-to-end by `backend/tests/ai/test_analysis_service_pipeline.py`.
 
 ## 5. Database Design
 
@@ -194,23 +194,37 @@ Design notes:
 
 ## 6. AI/ML Architecture
 
-Neither `app/document_processing/interfaces.py` nor `app/ai/interfaces.py` import FastAPI, SQLAlchemy, or any provider SDK — they are pure Python `ABC`s so `AnalysisService` can depend on a contract, never a vendor. `document_processing` (including OCR) is now fully implemented (see §8); `ai` — the LLM/clinical-analysis boundary — is still interfaces only.
+Neither `app/document_processing/interfaces.py` nor `app/ai/interfaces.py` import FastAPI, SQLAlchemy, or any provider SDK — they are pure Python `ABC`s so `AnalysisService` can depend on a contract, never a vendor. Both `document_processing` (including OCR) and the `ai` pipeline's contracts/orchestration are now fully implemented; the one thing still missing is a **working** `AIProvider` — see "Provider Status" below.
 
 ```
-raw bytes ──(document_processing, incl. OCR)──► normalized text ──(ai)──► ClinicalReport
+raw bytes ──(document_processing, incl. OCR)──► NormalizedDocument
+    ──(EXTRACT: AIProvider.extract)──► ExtractionResult
+    ──(GENERATE: AIProvider.generate)──► draft report (dict)
+    ──(VALIDATE: ClinicalReportValidator.validate, deterministic)──► ValidationResult{ClinicalReport}
 ```
 
 | Interface | Module | Input → Output | Failure mode |
 |---|---|---|---|
 | `DocumentProcessor` (`TextProcessor`, `PDFProcessor`, `ImageProcessor`) | `document_processing` | raw bytes → `NormalizedDocument` | `EmptyInputError`, `CorruptedFileError`, `OCRFailedError` |
 | `OCREngine` (one implementation: `TesseractOCREngine`) | `document_processing` | image bytes → `OCRResult` | `OCRFailedError` |
-| `ClinicalInformationExtractor` | `ai` | normalized text → `ClinicalExtractionResult` (loose intermediate representation) | `AIProcessingError` |
-| `ClinicalReportGenerator` | `ai` | `ClinicalExtractionResult` + text → `ClinicalReport` (raw, not yet trusted) | `AIProcessingError` |
-| `StructuredOutputValidator` | `ai` | raw generator output → validated `ClinicalReport` | `MalformedStructuredOutputError` |
+| `AIProvider` (one implementation: `UnconfiguredAIProvider`) | `ai` | `NormalizedDocument` → `ExtractionResult`; `ExtractionResult` → draft report (`dict`) | `AIExtractionFailedError`, `AIGenerationFailedError` |
+| `ClinicalReportValidator` (one implementation: `DeterministicClinicalReportValidator`) | `ai` | draft report + `ExtractionResult` + source text → `ValidationResult` | never raises — see "Deterministic Validation" below |
 
-`document_processing/factory.py::get_processor` dispatches on `DocumentSourceType` to the right `DocumentProcessor`, wiring in `ocr_tesseract.py::get_default_ocr_engine()` (reads `Settings.ocr_engine`) for `PDFProcessor`/`ImageProcessor`. Concrete AI implementations (a specific LLM provider call) will live in the independent top-level `ml/` package (prompts, provider calls, evaluation), wired in via a factory selected by `AI_PROVIDER`/`AI_MODEL_NAME` in `app/core/config.py`. **No such AI factory or implementation exists yet** — only the `ai` interfaces and the schemas they exchange. Note also that `document_processing` — OCR included — is fully implemented but **not yet wired into `AnalysisService`** — `run_pipeline` (§4) still raises `NotImplementedError`; this phase built and unit-tested the processing layer standalone.
+`document_processing/factory.py::get_processor` dispatches on `DocumentSourceType` to the right `DocumentProcessor`, wiring in `ocr_tesseract.py::get_default_ocr_engine()` (reads `Settings.ocr_engine`) for `PDFProcessor`/`ImageProcessor`. `ai/factory.py::get_default_ai_provider()`/`get_default_validator()` do the analogous thing for the AI stage, reading `Settings.ai_provider`. `app.ai.pipeline.ClinicalAnalysisPipeline` sequences EXTRACT → GENERATE → VALIDATE and is what `AnalysisService.run_pipeline()` calls — see §8 and [008-ai-pipeline.md](../decisions/008-ai-pipeline.md) for the full design, including why validation is a separate interface from generation rather than a third `AIProvider` method.
 
-`StructuredOutputValidator` is a deliberate, separate stage rather than trusting whatever `ClinicalReportGenerator` returns: every provider implementation's output — regardless of how well-behaved the provider's "JSON mode" claims to be — passes through the same schema gate before it can be persisted or trusted, and validator implementations may perform bounded structural repair (type coercion, moving unparsable fields to `missing_information`) but must never fabricate clinical content to satisfy the schema.
+**Provider status**: `AI_PROVIDER=placeholder` (the shipped default) resolves to `UnconfiguredAIProvider`, which raises a clear, typed error on every call rather than fabricating output. `AI_PROVIDER=openai` selects a real implementation, `OpenAICompatibleProvider` (`app/ai/providers/openai_compatible.py`) — a plain `httpx` call to any OpenAI-compatible `/chat/completions` endpoint (OpenAI itself by default; `AI_API_BASE_URL` to point elsewhere), configured entirely via `AI_PROVIDER`/`AI_MODEL_NAME`/`AI_API_KEY`/`AI_API_BASE_URL` env vars, no credentials in code. `POST /api/v1/analyses` now calls `AnalysisService.run_pipeline()` synchronously, so with a real key configured the endpoint performs real extraction/generation; without one, it fails cleanly with `AI_EXTRACTION_FAILED` rather than fabricating a report. See `docs/decisions/008-ai-pipeline.md` "Real Provider (Step 2)".
+
+Contracts and orchestration for the `ai` pipeline live in `backend/app/ai/`, not the top-level `ml/` directory the original architecture sketch (ADR-004) anticipated — `ml/` is not on the backend's Python import path and is outside the backend Docker image's build context; see [008-ai-pipeline.md](../decisions/008-ai-pipeline.md) "Design Decisions That Need Review" #3 for the full reasoning and what would need to change to use it for real.
+
+### Pipeline Orchestration
+
+`app.ai.pipeline.ClinicalAnalysisPipeline.run(document)` — called by `AnalysisService.run_pipeline()` (§4) — always runs, in order: EXTRACT, a lightweight evidence-grounding check on the extraction itself (catches a hallucinating extractor before spending a GENERATE call on it; raises `EvidenceMismatchError` if any extracted fact cites a quote absent from the source text), GENERATE, then VALIDATE. There is no code path that returns a result without calling the validator — enforced by construction (the method has one `return`, after the validate call) and confirmed by a test using a call-counting wrapper around the real validator.
+
+### Deterministic Validation
+
+`DeterministicClinicalReportValidator` is pure Python — no LLM call, no network — and never raises; it always returns a `ValidationResult` (`VALID`/`INVALID` + a list of issues), converting even a totally malformed draft into an `INVALID` result rather than crashing the pipeline. It checks: (1) the draft actually satisfies the `ClinicalReport` schema (including that schema's own existing "non-inferred finding needs evidence" and "requires_review" rules); (2) every finding's evidence quote is a verbatim substring of the source document (`EVIDENCE_NOT_GROUNDED`) — the concrete mechanism behind "a claim must be traceable to the document, not fabricated"; (3) extraction-flagged missing information isn't silently dropped from the report (`MISSING_INFORMATION_NOT_REPRESENTED`, a warning); (4) a finding doesn't claim higher confidence than the extracted fact backing it (`CONFIDENCE_NOT_PRESERVED`, a warning). Only schema-invalidity and ungrounded evidence are `ERROR`-severity (they make the result `INVALID`); the other two are `WARNING`-severity — recorded, but don't by themselves block a report. Full checklist mapping: [008-ai-pipeline.md](../decisions/008-ai-pipeline.md) "Deterministic Validation".
+
+The validator is a completely separate class hierarchy from `AIProvider` — it is never given a chance to be *the same provider grading its own output*, and it is constructed independently (`ai/factory.py::get_default_validator()`) regardless of which `AIProvider` is configured.
 
 ## 7. AI/ML Report Contract
 
@@ -280,7 +294,7 @@ One engine implementation exists: `ocr_tesseract.py::TesseractOCREngine`, wrappi
 | `NO_EXTRACTABLE_TEXT` | `PDFProcessor` | No page in the whole document yielded any text, native or OCR. |
 | `HANDWRITING_MAY_REQUIRE_SPECIALIZED_MODEL` | `TesseractOCREngine` | See "Handwriting" above. |
 
-The document-processing layer has zero FastAPI/SQLAlchemy imports (see interface module docstrings) and makes no LLM/AI provider call. It is fully implemented and unit-tested (`backend/tests/document_processing/`, `FakeOCREngine` standing in for the real engine — see `docs/testing/README.md`) but **not yet called by `AnalysisService`** — wiring it into `run_pipeline` (§4) remains deliberately out of scope; this phase built and validated the processing layer, OCR included, standalone.
+The document-processing layer has zero FastAPI/SQLAlchemy imports (see interface module docstrings) and makes no LLM/AI provider call. It is fully implemented and unit-tested (`backend/tests/document_processing/`, `FakeOCREngine` standing in for the real engine — see `docs/testing/README.md`). `AnalysisService.run_pipeline()` (§4) now calls it for real, though currently only for **TEXT** analyses — reconstructing a `NormalizedDocument` for PDF/IMAGE requires the original file bytes, which are not yet persisted (see §4's `DocumentBytesUnavailableError` note and [008-ai-pipeline.md](../decisions/008-ai-pipeline.md) design decision 7).
 
 ## 9. Error Architecture
 
@@ -308,8 +322,13 @@ Every failed request returns the same envelope (`app/schemas/common.py::ErrorRes
 | Report requested before `COMPLETED` | `REPORT_NOT_READY` | 409 |
 | Text/PDF extraction failure | `EXTRACTION_FAILED` | 422 |
 | OCR failure | `OCR_FAILED` | 422 |
-| AI pipeline failure (provider error/timeout) | `AI_PROCESSING_FAILED` | 502 |
-| AI output fails schema validation | `MALFORMED_AI_OUTPUT` | 502 |
+| Document bytes needed for (re-)processing were never persisted | `DOCUMENT_BYTES_UNAVAILABLE` | 422 |
+| AI provider failure, unspecified (base class — see the two below) | `AI_PROCESSING_FAILED` | 502 |
+| AI provider failure during EXTRACT | `AI_EXTRACTION_FAILED` | 502 |
+| AI provider failure during GENERATE | `AI_GENERATION_FAILED` | 502 |
+| Extracted fact cites evidence absent from the source document | `EVIDENCE_MISMATCH` | 422 |
+| Generated report failed deterministic validation | `REPORT_VALIDATION_FAILED` | 422 |
+| No usable AI provider configured | `UNSUPPORTED_AI_PROVIDER` | 501 |
 | Database write failure | `PERSISTENCE_FAILED` | 500 |
 | Required external service unavailable | `EXTERNAL_SERVICE_FAILED` | 503 |
 | Anything else unhandled | `INTERNAL_ERROR` | 500 |
@@ -325,5 +344,7 @@ All of the above are `AppError` subclasses in `app/core/exceptions.py`; business
 - Diagram source: [`architecture-diagram.mmd`](architecture-diagram.mmd)
 - Technical decision records: [`../decisions/`](../decisions)
 - Structured report schema: `backend/app/schemas/clinical_report.py`
+- AI/ML pipeline contracts: `backend/app/ai/schemas.py`, `backend/app/ai/interfaces.py`
+- Pipeline orchestrator: `backend/app/ai/pipeline.py`
 - Processing status enum & transition table: `backend/app/core/enums.py`
 - Initial migration: `backend/migrations/versions/0001_initial_schema.py`

@@ -9,3 +9,4 @@ Architecture Decision Records (ADRs), one per major technical choice. Format: Pr
 - [005-storage.md](005-storage.md) — Object storage strategy for uploaded documents
 - [006-deployment.md](006-deployment.md) — Docker-first local development, AWS deployment deferred
 - [007-ocr.md](007-ocr.md) — OCR engine selection (Tesseract), alternatives, handwriting/confidence handling
+- [008-ai-pipeline.md](008-ai-pipeline.md) — AI/ML pipeline: EXTRACT→GENERATE→VALIDATE, provider abstraction, deterministic validation, evidence grounding

@@ -51,10 +51,15 @@ async def create_analysis(
     file: UploadFile | None = File(default=None, description="Image (scanned/handwritten) or PDF document."),
     service: AnalysisService = Depends(get_analysis_service),
 ) -> AnalysisResponse:
-    """Submit exactly one of `text` or `file`. Returns immediately with
-    status PENDING — this endpoint only validates and persists the
-    submission; running it through the processing pipeline is not yet
-    implemented (see `AnalysisService.run_pipeline`).
+    """Submit exactly one of `text` or `file`. Validates and persists the
+    submission, then synchronously runs it through the full pipeline
+    (document normalization -> AI extract/generate -> deterministic
+    validate -> persist report) before responding — there is no
+    background job queue yet (see docs/decisions/008-ai-pipeline.md
+    "What Async Will Need"), so the response reflects the final status
+    (COMPLETED/FAILED), not always PENDING. `run_pipeline` never raises:
+    any failure is reflected as `status: FAILED` with a safe
+    error_code/message, never a 5xx or a fabricated report.
     """
     file_bytes = await file.read() if file is not None else None
     analysis = service.create_analysis(
@@ -63,6 +68,7 @@ async def create_analysis(
         content_type=file.content_type if file is not None else None,
         file_bytes=file_bytes,
     )
+    analysis = service.run_pipeline(analysis.id)
     return _to_response(analysis)
 
 

@@ -87,19 +87,60 @@ class OCRFailedError(AppError):
     message = "Failed to extract text from the submitted image via OCR."
 
 
+class DocumentBytesUnavailableError(AppError):
+    """Raised when re-processing a document requires its raw bytes and
+    they were never persisted — currently true for every PDF/IMAGE
+    analysis, since object storage writes are not yet implemented (see
+    docs/decisions/005-storage.md). TEXT analyses are unaffected: their
+    content is already stored as `Analysis.extracted_text`.
+    """
+
+    code = "DOCUMENT_BYTES_UNAVAILABLE"
+    status_code = 422
+    message = "The original document bytes are not available for processing."
+
+
 # ---- AI/ML pipeline errors ----------------------------------------------
 
 
 class AIProcessingError(AppError):
+    """Base class for any AI-provider-level failure. Callers that don't
+    care which stage failed can catch this; the pipeline orchestrator
+    always raises one of the two specific subclasses below instead of
+    this directly.
+    """
+
     code = "AI_PROCESSING_FAILED"
     status_code = 502
     message = "The AI/ML clinical analysis step failed."
 
 
-class MalformedStructuredOutputError(AppError):
-    code = "MALFORMED_AI_OUTPUT"
-    status_code = 502
-    message = "The AI/ML pipeline returned output that does not conform to the expected report schema."
+class AIExtractionFailedError(AIProcessingError):
+    code = "AI_EXTRACTION_FAILED"
+    message = "The AI provider failed while extracting structured clinical facts."
+
+
+class AIGenerationFailedError(AIProcessingError):
+    code = "AI_GENERATION_FAILED"
+    message = "The AI provider failed while generating the draft clinical report."
+
+
+class EvidenceMismatchError(AppError):
+    code = "EVIDENCE_MISMATCH"
+    status_code = 422
+    message = "Extracted facts cite evidence that could not be found in the source document."
+
+
+class ReportValidationFailedError(AppError):
+    code = "REPORT_VALIDATION_FAILED"
+    status_code = 422
+    message = "The generated clinical report failed deterministic validation."
+
+
+class UnsupportedAIProviderError(AppError):
+    code = "UNSUPPORTED_AI_PROVIDER"
+    status_code = 501
+    message = "No usable AI provider is configured."
 
 
 # ---- Infrastructure errors ----------------------------------------------

@@ -17,10 +17,10 @@ flowchart TB
             OCR["OCREngine\n(TesseractOCREngine —\nlocal Tesseract binary,\nno external service)"]
         end
 
-        subgraph AI["AI / ML layer\napp/ai (interfaces) + ml/ (implementations)"]
-            CIE["ClinicalInformationExtractor"]
-            CRG["ClinicalReportGenerator"]
-            SOV["StructuredOutputValidator"]
+        subgraph AI["AI / ML pipeline\napp/ai"]
+            PIPE["ClinicalAnalysisPipeline\n(EXTRACT -> GENERATE -> VALIDATE\norchestrator)"]
+            AIP["AIProvider\n(one impl: UnconfiguredAIProvider —\nno real LLM wired up yet)"]
+            CRV["ClinicalReportValidator\n(DeterministicClinicalReportValidator —\npure Python, no LLM call)"]
         end
     end
 
@@ -34,8 +34,8 @@ flowchart TB
     SVC --> REPO
     REPO <--> DB
 
-    SVC -->|"raw file bytes"| STORAGE
-    SVC -->|"route by source_type\n(document_processing/factory.py)\n[not yet wired to SVC — see §8]"| DocProc
+    SVC -->|"raw file bytes\n(TEXT only — PDF/IMAGE\nbytes not yet persisted)"| STORAGE
+    SVC -->|"route by source_type\n(document_processing/factory.py)"| DocProc
     TXT -->|"NormalizedDocument"| SVC
     PDFP -->|"NormalizedDocument"| SVC
     IMG -->|"NormalizedDocument"| SVC
@@ -44,11 +44,13 @@ flowchart TB
     OCR -->|"OCRResult"| PDFP
     OCR -->|"OCRResult"| IMG
 
-    SVC -->|"normalized text"| AI
-    CIE --> CRG
-    CRG --> SOV
-    SOV -->|"validated ClinicalReport"| SVC
-    CRG -.->|"provider call\n(implementation-specific)"| EXTAI
+    SVC -->|"run_pipeline():\nNormalizedDocument"| PIPE
+    PIPE -->|"extract() / generate()"| AIP
+    AIP -->|"ExtractionResult / draft report"| PIPE
+    AIP -.->|"provider call\n(none yet — placeholder\nraises instead)"| EXTAI
+    PIPE -->|"draft report + ExtractionResult\n+ source text"| CRV
+    CRV -->|"ValidationResult"| PIPE
+    PIPE -->|"PipelineResult\n(or raises on any\nstage failure)"| SVC
 
     SVC -->|"persist ClinicalReport +\nProcessingEvent audit trail"| REPO
 

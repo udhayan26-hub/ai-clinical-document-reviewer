@@ -37,7 +37,7 @@ ai-clinical-document-reviewer/
 │   │   ├── schemas/             Pydantic contracts (requests/responses, ClinicalReport)
 │   │   ├── services/            use-case orchestration (AnalysisService)
 │   │   ├── repositories/        SQLAlchemy persistence per model
-│   │   ├── document_processing/ DocumentTextExtractor / OCRProcessor interfaces
+│   │   ├── document_processing/ DocumentProcessor: TextProcessor, PDFProcessor (ImageProcessor stub pending OCR)
 │   │   └── ai/                  ClinicalInformationExtractor / ClinicalReportGenerator / StructuredOutputValidator interfaces
 │   ├── migrations/          Alembic migrations (initial schema: 0001)
 │   └── tests/               Pytest unit/API tests
@@ -120,22 +120,23 @@ docker compose up --build
 
 ## Current Project Status
 
-**Implemented (this phase — architecture & engineering contracts):**
+**Implemented:**
 - Backend layering (`api → services → repositories/document_processing/ai → models`), documented module ownership boundaries
-- Versioned REST API (`/api/v1/analyses`: create, list, get, get report) with full request/response/error contracts, backed by real persistence
-- PostgreSQL schema (4 tables) as SQLAlchemy models + an Alembic migration, portable to SQLite for fast tests
+- Versioned REST API (`/api/v1/analyses`: create, list, get, get report) with full request/response/error contracts, backed by real persistence, validated end-to-end against a real PostgreSQL container (not just SQLite)
+- PostgreSQL schema (4 tables) as SQLAlchemy models + an Alembic migration (runs on container startup, idempotent, blocks server start on failure), portable to SQLite for fast tests
 - Processing lifecycle state machine (`PENDING → VALIDATING → EXTRACTING → ANALYZING → COMPLETED/FAILED`) defined with an explicit transition table
-- AI/ML and document-processing interfaces (no implementations) — provider-agnostic by construction
+- **Document-processing foundation**: `DocumentProcessor` interface with working `TextProcessor` (plain text, Unicode-safe, whitespace normalization) and `PDFProcessor` (native-text-layer extraction via `pypdf`, multi-page, explicitly flags `requires_ocr` instead of pretending success on scanned/no-text PDFs) — `ImageProcessor` is a stub pending OCR. **Not yet wired into `AnalysisService`** — built and unit-tested standalone (see `docs/architecture/system-architecture.md` §8).
+- AI/ML interfaces (no implementation) — provider-agnostic by construction
 - The structured `ClinicalReport` Pydantic contract, with enforced evidence/confidence/`requires_review` rules, mirrored in TypeScript
 - Consistent error-response envelope across the API
 - Docker Compose (frontend/backend/db), Dockerfiles, lightweight CI (backend tests + frontend build)
-- 15 passing backend tests (API validation paths + report schema rules)
+- 32 passing backend tests (API validation paths, report schema rules, document-processing unit tests against synthetic fixtures)
 
 **Not yet implemented (planned):**
-- Actual text extraction / OCR (`document_processing` implementations)
+- OCR (scanned/handwritten images, and scanned PDF pages) — `ImageProcessor` stub only
 - Actual AI/ML clinical analysis (`ai`/`ml` implementations, provider selection)
+- Wiring `document_processing` into `AnalysisService.run_pipeline` (currently an intentional `NotImplementedError`)
 - Object storage writes (uploaded file bytes are validated but not yet persisted to disk/S3)
-- Pipeline execution (`AnalysisService.run_pipeline` is an intentional `NotImplementedError`)
 - Frontend UI (only TypeScript API/report types exist)
 - Authentication
 - AWS deployment
@@ -145,7 +146,9 @@ docker compose up --build
 
 - [x] Project & repository foundation
 - [x] System architecture & engineering contracts (backend skeleton, API contract, DB schema, AI/ML interfaces, error architecture)
-- [ ] Document ingestion & validation implementation (text / image / PDF extraction, OCR)
+- [x] Docker/PostgreSQL development environment validated end-to-end
+- [x] Document-processing foundation: plain text + PDF text extraction, normalized representation, unit tests
+- [ ] OCR (image + scanned PDF)
 - [ ] AI/ML clinical analysis pipeline implementation
 - [ ] Structured report generation wired end-to-end (pipeline execution)
 - [ ] Frontend application

@@ -87,6 +87,12 @@ class OCRFailedError(AppError):
     message = "Failed to extract text from the submitted image via OCR."
 
 
+class OCRNotImplementedError(AppError):
+    code = "OCR_NOT_IMPLEMENTED"
+    status_code = 501
+    message = "OCR-based image processing is not implemented yet."
+
+
 # ---- AI/ML pipeline errors ----------------------------------------------
 
 

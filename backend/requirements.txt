@@ -11,6 +11,9 @@ sqlalchemy
 alembic
 psycopg2-binary
 
+# --- Document processing ---
+pypdf
+
 # --- Testing ---
 pytest
 pytest-asyncio

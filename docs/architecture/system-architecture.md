@@ -16,7 +16,7 @@ See [`architecture-diagram.mmd`](architecture-diagram.mmd) for the full componen
 Two hard boundaries shape the whole design:
 
 1. **Frontend and backend are fully separate** — the frontend only ever talks to the backend over the versioned REST contract in [§3](#3-api-contract). No shared code, no server-rendering coupling.
-2. **The AI/ML layer is provider-agnostic** — `app/ai` and `app/document_processing` expose interfaces only ([§6](#6-aiml-architecture)); no OpenAI/Anthropic/Gemini/Tesseract/etc. specific code exists in business logic. Swapping a provider means adding one new implementation class, never touching `app/api` or `app/services`.
+2. **The AI/ML layer is provider-agnostic** — `app/ai` exposes interfaces only, and `app/document_processing` depends on no OCR/AI provider at all yet ([§6](#6-aiml-architecture)); no OpenAI/Anthropic/Gemini/Tesseract/etc. specific code exists in business logic. Swapping a provider means adding one new implementation class, never touching `app/api` or `app/services`.
 
 ## 2. Backend Architecture
 
@@ -30,7 +30,7 @@ Two hard boundaries shape the whole design:
 | `schemas/` | Pydantic request/response contracts, the `ClinicalReport` structured-output contract, the error envelope | Persistence, HTTP status codes, business logic |
 | `services/` | Use-case orchestration (`AnalysisService`): input validation, coordinating `repositories/`, `document_processing/`, and `ai/` to move an analysis through its lifecycle | HTTP concerns, raw SQL, provider-specific extraction/AI code |
 | `repositories/` | Translating between domain objects and SQL rows/queries via SQLAlchemy `Session` | Business rules (e.g. which status transitions are legal), request/response shaping |
-| `document_processing/` | Interfaces for turning raw bytes into normalized text (`DocumentTextExtractor`, `OCRProcessor`) | HTTP, persistence, clinical interpretation |
+| `document_processing/` | Turning raw bytes into normalized text: the `DocumentProcessor` interface and its `TextProcessor`/`PDFProcessor` implementations (`ImageProcessor` is a stub pending OCR) | HTTP, persistence, clinical interpretation |
 | `ai/` | Interfaces for clinical extraction/report generation/output validation (implementations live in top-level `ml/`) | HTTP, persistence, OCR/text extraction |
 | `main.py` | FastAPI app construction: middleware, exception handler registration, router mounting | Route logic, business logic |
 
@@ -117,7 +117,7 @@ stateDiagram-v2
 
 - **PENDING** — analysis record created and persisted; not yet picked up for processing.
 - **VALIDATING** — confirming the stored document is readable/well-formed (distinct from the request-level validation in §3, which happens before an Analysis row even exists).
-- **EXTRACTING** — `document_processing` interfaces run (`DocumentTextExtractor` or `OCRProcessor` depending on `source_type`) to produce normalized text.
+- **EXTRACTING** — the `DocumentProcessor` for the document's `source_type` (`app/document_processing/factory.py::get_processor`) runs to produce a `NormalizedDocument`.
 - **ANALYZING** — `ai` interfaces run (`ClinicalInformationExtractor` → `ClinicalReportGenerator` → `StructuredOutputValidator`) against the normalized text.
 - **COMPLETED** — a validated `ClinicalReport` has been persisted; terminal.
 - **FAILED** — terminal; `Analysis.error_code`/`error_message` are set. Reachable from any non-terminal state.
@@ -194,7 +194,7 @@ Design notes:
 
 ## 6. AI/ML Architecture
 
-Neither `app/document_processing/interfaces.py` nor `app/ai/interfaces.py` import FastAPI, SQLAlchemy, or any provider SDK — they are pure Python `ABC`s so `AnalysisService` can depend on a contract, never a vendor.
+Neither `app/document_processing/interfaces.py` nor `app/ai/interfaces.py` import FastAPI, SQLAlchemy, or any provider SDK — they are pure Python `ABC`s so `AnalysisService` can depend on a contract, never a vendor. `document_processing` is now implemented (see §8); `ai` is still interfaces only.
 
 ```
 raw bytes ──(document_processing)──► normalized text ──(ai)──► ClinicalReport
@@ -202,13 +202,12 @@ raw bytes ──(document_processing)──► normalized text ──(ai)──�
 
 | Interface | Module | Input → Output | Failure mode |
 |---|---|---|---|
-| `DocumentTextExtractor` | `document_processing` | typed-text bytes (TXT, typed PDF) → `ExtractionResult` | `CorruptedFileError`, `TextExtractionError` |
-| `OCRProcessor` | `document_processing` | image bytes (scanned/handwritten, incl. image-only PDF pages) → `ExtractionResult` | `OCRFailedError` |
+| `DocumentProcessor` (`TextProcessor`, `PDFProcessor`; `ImageProcessor` stub) | `document_processing` | raw bytes → `NormalizedDocument` | `EmptyInputError`, `CorruptedFileError`, `OCRNotImplementedError` (image, for now) |
 | `ClinicalInformationExtractor` | `ai` | normalized text → `ClinicalExtractionResult` (loose intermediate representation) | `AIProcessingError` |
 | `ClinicalReportGenerator` | `ai` | `ClinicalExtractionResult` + text → `ClinicalReport` (raw, not yet trusted) | `AIProcessingError` |
 | `StructuredOutputValidator` | `ai` | raw generator output → validated `ClinicalReport` | `MalformedStructuredOutputError` |
 
-Concrete implementations (a specific OCR engine, a specific LLM provider call) will live under `document_processing/` (for extractors) and the independent top-level `ml/` package (for AI pipeline logic — prompts, provider calls, evaluation), wired in via factories selected by `AI_PROVIDER`/`AI_MODEL_NAME` in `app/core/config.py`. **No such factory or implementation exists yet in this phase** — only the interfaces and the schemas they exchange.
+`document_processing/factory.py::get_processor` dispatches on `DocumentSourceType` to the right `DocumentProcessor`. Concrete AI implementations (a specific LLM provider call) will live in the independent top-level `ml/` package (prompts, provider calls, evaluation), wired in via a factory selected by `AI_PROVIDER`/`AI_MODEL_NAME` in `app/core/config.py`. **No such AI factory or implementation exists yet** — only the `ai` interfaces and the schemas they exchange. Note also that `document_processing` is implemented but **not yet wired into `AnalysisService`** — `run_pipeline` (§4) still raises `NotImplementedError`; this phase built and unit-tested the processing layer in isolation.
 
 `StructuredOutputValidator` is a deliberate, separate stage rather than trusting whatever `ClinicalReportGenerator` returns: every provider implementation's output — regardless of how well-behaved the provider's "JSON mode" claims to be — passes through the same schema gate before it can be persisted or trusted, and validator implementations may perform bounded structural repair (type coercion, moving unparsable fields to `missing_information`) but must never fabricate clinical content to satisfy the schema.
 
@@ -239,17 +238,18 @@ The frontend is expected to render `inferred`/non-`HIGH` content visibly differe
 ```
 input (text | image | pdf)
   → validation (type, size — app/services/analysis_service.py, before persistence)
-  → extraction/OCR (app/document_processing interfaces, per source_type — not yet implemented)
-  → normalized text (Analysis.extracted_text)
-  → AI extraction (app/ai interfaces — not yet implemented)
+  → DocumentProcessor.process() (app/document_processing, per source_type)
+  → NormalizedDocument (text, page_count, warnings, confidence, requires_ocr)
+  → AI extraction (app/ai interfaces — not yet implemented; not yet wired to this layer either)
 ```
 
-Per-type handling:
-- **TXT**: no extraction step needed — the submitted text *is* the normalized text; stored directly on `Analysis.extracted_text` at creation time.
-- **PDF**: routed to `DocumentTextExtractor` if it carries a native text layer, or per-page to `OCRProcessor` if it doesn't (typed vs. scanned vs. mixed PDFs) — this routing decision lives in a not-yet-written `document_processing/factory.py`, deliberately kept out of `services/` and out of route handlers.
-- **IMAGE**: always routed to `OCRProcessor`, covering both clean scans and handwriting.
+`app/document_processing/interfaces.py` defines `DocumentProcessor` (one method: `process(raw_bytes) -> NormalizedDocument`) and the `NormalizedDocument`/`ExtractionWarning`/`ExtractionConfidence` models every implementation shares. `factory.py::get_processor(source_type)` dispatches to the right one:
 
-The document-processing layer has zero FastAPI/SQLAlchemy imports (see interface module docstrings) — `AnalysisService` is the only caller, and only through the `DocumentTextExtractor`/`OCRProcessor` interfaces, never a concrete library.
+- **TEXT** (`text_processor.TextProcessor`) — no extraction needed, decodes UTF-8 and normalizes whitespace (`normalization.py`); the submitted text *is* the document. Empty/whitespace-only input raises `EmptyInputError`; invalid UTF-8 raises `CorruptedFileError`.
+- **PDF** (`pdf_processor.PDFProcessor`) — extracts each page's native text layer via `pypdf`; a page with no text is *not* an error, it's recorded as a `PAGE_HAS_NO_TEXT` warning, and if **every** page has none, the result comes back with `requires_ocr=True` and a `NO_EXTRACTABLE_TEXT` warning rather than pretending extraction succeeded. Zero pages raises `EmptyInputError`; a file `pypdf` can't parse raises `CorruptedFileError`. **No OCR fallback exists yet** — a scanned/image-only PDF correctly comes back flagged `requires_ocr=True`, it is not processed further in this phase.
+- **IMAGE** (`image_processor.ImageProcessor`) — stub. `get_processor` returns an instance (processor *selection* always succeeds), but calling `.process()` always raises `OCRNotImplementedError` — actual OCR is a later phase (see `docs/decisions/004-ai-ml.md`). When OCR is implemented, `ImageProcessor.process()` gets a real body returning a `NormalizedDocument` exactly like the other two — no interface change, no caller changes. The same OCR engine would also plug into `PDFProcessor`'s scanned-page case, since both problems ("no native text layer here") reduce to the same `raw_bytes -> NormalizedDocument` shape.
+
+The document-processing layer has zero FastAPI/SQLAlchemy imports (see interface module docstrings). It is fully implemented and unit-tested (`backend/tests/document_processing/`) but **not yet called by `AnalysisService`** — wiring it into `run_pipeline` (§4) is deliberately out of scope for this phase, which built and validated the processing layer standalone first.
 
 ## 9. Error Architecture
 

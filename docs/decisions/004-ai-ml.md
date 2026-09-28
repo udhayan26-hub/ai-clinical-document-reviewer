@@ -6,7 +6,9 @@ The system must run clinical analysis via *some* AI/ML approach, but the specifi
 
 ## Decision
 
-Define the AI/ML pipeline purely as interfaces in this phase — `DocumentTextExtractor`, `OCRProcessor` (`backend/app/document_processing/interfaces.py`), and `ClinicalInformationExtractor`, `ClinicalReportGenerator`, `StructuredOutputValidator` (`backend/app/ai/interfaces.py`) — with zero concrete implementation and zero provider SDK code. Concrete implementations will live behind these interfaces, with pipeline-specific logic (prompts, provider calls, evaluation) isolated in the independent top-level `ml/` package, selected via `AI_PROVIDER`/`AI_MODEL_NAME` settings.
+Define the AI/ML pipeline purely as interfaces in this phase — `DocumentProcessor` (`backend/app/document_processing/interfaces.py`), and `ClinicalInformationExtractor`, `ClinicalReportGenerator`, `StructuredOutputValidator` (`backend/app/ai/interfaces.py`) — with zero provider SDK code. Concrete implementations will live behind these interfaces, with pipeline-specific logic (prompts, provider calls, evaluation) isolated in the independent top-level `ml/` package, selected via `AI_PROVIDER`/`AI_MODEL_NAME` settings.
+
+> **Update (document-processing foundation phase):** `DocumentProcessor` now has real, non-LLM implementations — `TextProcessor` and `PDFProcessor` (no external service, no AI/OCR provider involved; `ImageProcessor` remains a stub pending OCR). This doesn't change the decision above: `ai/interfaces.py` (the actual AI/ML/LLM boundary this ADR is about) is still interfaces only, with no provider selected or called anywhere.
 
 ## Rationale
 
@@ -24,4 +26,4 @@ Define the AI/ML pipeline purely as interfaces in this phase — `DocumentTextEx
 ## Trade-offs
 
 - Nothing in the AI/ML pipeline actually runs yet — `AnalysisService.run_pipeline` raises `NotImplementedError` by design. This is intentional scope for this phase (architecture/contracts only), not an oversight.
-- Interface-first design means the eventual implementation must be reconciled against these contracts rather than the contracts being derived from a working implementation; the risk is mitigated by having concrete, tested schemas (`ClinicalReport`, `ExtractionResult`, `ClinicalExtractionResult`) rather than speculative method signatures alone.
+- Interface-first design means the eventual implementation must be reconciled against these contracts rather than the contracts being derived from a working implementation; the risk is mitigated by having concrete, tested schemas (`ClinicalReport`, `NormalizedDocument`, `ClinicalExtractionResult`) rather than speculative method signatures alone.

@@ -11,8 +11,9 @@ flowchart TB
         REPO["Repositories\napp/repositories\n(SQLAlchemy persistence)"]
 
         subgraph DocProc["Document Processing\napp/document_processing"]
-            EXT["DocumentTextExtractor\n(TXT / typed PDF)"]
-            OCR["OCRProcessor\n(images, scanned & handwritten PDFs)"]
+            TXT["TextProcessor\n(plain text)"]
+            PDFP["PDFProcessor\n(typed-text PDFs;\nflags requires_ocr otherwise)"]
+            IMG["ImageProcessor (stub)\nOCR — not yet implemented"]
         end
 
         subgraph AI["AI / ML layer\napp/ai (interfaces) + ml/ (implementations)"]
@@ -33,9 +34,10 @@ flowchart TB
     REPO <--> DB
 
     SVC -->|"raw file bytes"| STORAGE
-    SVC -->|"route by source_type"| DocProc
-    EXT -->|"normalized text"| SVC
-    OCR -->|"normalized text"| SVC
+    SVC -->|"route by source_type\n(document_processing/factory.py)"| DocProc
+    TXT -->|"NormalizedDocument"| SVC
+    PDFP -->|"NormalizedDocument"| SVC
+    IMG -.->|"OCRNotImplementedError\n(stub, not wired up)"| SVC
 
     SVC -->|"normalized text"| AI
     CIE --> CRG

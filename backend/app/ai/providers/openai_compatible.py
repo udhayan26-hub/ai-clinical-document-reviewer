@@ -72,6 +72,7 @@ Critical rules:
 - Never claim higher confidence for a finding than the source fact(s) it's based on.
 - Copy every item from the input's "missing_information" into the report's "missing_information".
 - If anything is uncertain, inferred, or incomplete anywhere in the report, set "requires_review": true.
+- "patient_information.age" must be a JSON string if present (e.g. "45"), never a number.
 """
 
 

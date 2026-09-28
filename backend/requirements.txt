@@ -1,0 +1,21 @@
+# --- Web framework ---
+fastapi
+uvicorn[standard]
+
+# --- Validation / settings ---
+pydantic
+pydantic-settings
+
+# --- Database ---
+sqlalchemy
+alembic
+psycopg2-binary
+
+# --- Testing ---
+pytest
+pytest-asyncio
+httpx
+
+# --- Utilities ---
+python-multipart
+python-dotenv
